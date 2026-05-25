@@ -28,6 +28,15 @@
 --    docker-compose down -v && docker-compose up -d
 -- ============================================================
 
+CREATE TABLE transit_flow_stations (
+    station_id VARCHAR(10) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    lines TEXT[] NOT NULL,
+    is_interchange_metro BOOLEAN NOT NULL,
+    interchange_metro_lines TEXT[],
+    is_interchange_national_rail BOOLEAN NOT NULL,
+    interchange_national_rail_station_id VARCHAR(10)
+);
 
 
 
