@@ -312,7 +312,3 @@ CREATE TABLE IF NOT EXISTS policy_documents (
 -- Index for fast cosine similarity search
 CREATE INDEX IF NOT EXISTS ON policy_documents USING hnsw (embedding vector_cosine_ops);
 
-CREATE TABLE IF NOT EXISTS try (
-    try_id         VARCHAR(15)  PRIMARY KEY,
-    
-);
