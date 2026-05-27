@@ -128,6 +128,30 @@ CREATE TABLE IF NOT EXISTS metro_schedule_operates (
     PRIMARY KEY (schedule_id, day_of_week)
 );
 
+-- 14. 國鐵座位配置主表
+CREATE TABLE IF NOT EXISTS national_rail_seat_layouts (
+    layout_id   VARCHAR(10) PRIMARY KEY
+);
+
+-- 15. 國鐵車廂配置
+CREATE TABLE IF NOT EXISTS national_rail_coaches (
+    layout_id  VARCHAR(10) REFERENCES national_rail_seat_layouts(layout_id) ON DELETE CASCADE,
+    coach      VARCHAR(2)  NOT NULL, -- e.g. A, B
+    fare_class VARCHAR(20) NOT NULL,
+    PRIMARY KEY (layout_id, coach)
+);
+
+-- 16. 國鐵座位明細
+CREATE TABLE IF NOT EXISTS national_rail_seats (
+    layout_id   VARCHAR(10) NOT NULL,
+    coach       VARCHAR(2)  NOT NULL,
+    seat_id     VARCHAR(10) NOT NULL,
+    row         INTEGER     NOT NULL,
+    seat_column VARCHAR(2)  NOT NULL, -- column is a reserved keyword in SQL, so we use seat_column
+    PRIMARY KEY (layout_id, coach, seat_id),
+    FOREIGN KEY (layout_id, coach) REFERENCES national_rail_coaches(layout_id, coach) ON DELETE CASCADE
+);
+
 -- 10. 國鐵營運班表主表 (支援軟刪除/車次停駛)
 CREATE TABLE IF NOT EXISTS national_rail_schedules (
     schedule_id            VARCHAR(20) PRIMARY KEY,
@@ -139,6 +163,7 @@ CREATE TABLE IF NOT EXISTS national_rail_schedules (
     first_train_time       TIME        NOT NULL,
     last_train_time        TIME        NOT NULL,
     frequency_min          INTEGER     NOT NULL,
+    layout_id              VARCHAR(10) REFERENCES national_rail_seat_layouts(layout_id) ON DELETE SET NULL,
     deleted_at             TIMESTAMPTZ DEFAULT NULL, -- 支援軟刪除 (schedules)
     is_active              BOOLEAN     NOT NULL DEFAULT TRUE
 );
@@ -167,31 +192,6 @@ CREATE TABLE IF NOT EXISTS national_rail_schedule_operates (
     schedule_id VARCHAR(20) REFERENCES national_rail_schedules(schedule_id) ON DELETE CASCADE,
     day_of_week VARCHAR(3)  NOT NULL,
     PRIMARY KEY (schedule_id, day_of_week)
-);
-
--- 14. 國鐵座位配置主表
-CREATE TABLE IF NOT EXISTS national_rail_seat_layouts (
-    layout_id   VARCHAR(10) PRIMARY KEY,
-    schedule_id VARCHAR(20) REFERENCES national_rail_schedules(schedule_id) ON DELETE CASCADE
-);
-
--- 15. 國鐵車廂配置
-CREATE TABLE IF NOT EXISTS national_rail_coaches (
-    layout_id  VARCHAR(10) REFERENCES national_rail_seat_layouts(layout_id) ON DELETE CASCADE,
-    coach      VARCHAR(2)  NOT NULL, -- e.g. A, B
-    fare_class VARCHAR(20) NOT NULL,
-    PRIMARY KEY (layout_id, coach)
-);
-
--- 16. 國鐵座位明細
-CREATE TABLE IF NOT EXISTS national_rail_seats (
-    layout_id   VARCHAR(10) NOT NULL,
-    coach       VARCHAR(2)  NOT NULL,
-    seat_id     VARCHAR(10) NOT NULL,
-    row         INTEGER     NOT NULL,
-    seat_column VARCHAR(2)  NOT NULL, -- column is a reserved keyword in SQL, so we use seat_column
-    PRIMARY KEY (layout_id, coach, seat_id),
-    FOREIGN KEY (layout_id, coach) REFERENCES national_rail_coaches(layout_id, coach) ON DELETE CASCADE
 );
 
 -- 17. 註冊使用者表 (支援帳號去識別化與軟刪除安全機制)
@@ -291,6 +291,33 @@ CREATE TABLE IF NOT EXISTS feedback (
 
 
 -- ============================================================
+--  PERFORMANCE INDEXES (優化常規查詢與外鍵關聯搜尋)
+-- ============================================================
+
+-- 1. 優化使用者預訂歷史與可用性查詢
+CREATE INDEX IF NOT EXISTS idx_bookings_user_id ON national_rail_bookings (user_id);
+CREATE INDEX IF NOT EXISTS idx_bookings_schedule_date ON national_rail_bookings (schedule_id, travel_date);
+
+-- 2. 優化捷運搭乘歷史查詢
+CREATE INDEX IF NOT EXISTS idx_metro_travel_user_id ON metro_travel_history (user_id);
+
+-- 3. 優化支付記錄多型外鍵查詢
+CREATE INDEX IF NOT EXISTS idx_payments_national_booking ON payments (national_booking_id);
+CREATE INDEX IF NOT EXISTS idx_payments_metro_trip ON payments (metro_trip_id);
+
+-- 4. 優化乘車回饋多型外鍵與使用者查詢
+CREATE INDEX IF NOT EXISTS idx_feedback_user_id ON feedback (user_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_national_booking ON feedback (national_booking_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_metro_trip ON feedback (metro_trip_id);
+
+-- 5. 優化捷運與國鐵班表站點快速過濾
+CREATE INDEX IF NOT EXISTS idx_metro_schedule_stops_station ON metro_schedule_stops (station_id);
+CREATE INDEX IF NOT EXISTS idx_national_rail_schedule_stops_station ON national_rail_schedule_stops (station_id);
+
+
+
+
+-- ============================================================
 --  VECTOR SCHEMA  (RAG / Help Desk) — do not modify
 -- ============================================================
 
@@ -310,5 +337,5 @@ CREATE TABLE IF NOT EXISTS policy_documents (
 );
 
 -- Index for fast cosine similarity search
-CREATE INDEX IF NOT EXISTS ON policy_documents USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS policy_documents_hnsw_idx ON policy_documents USING hnsw (embedding vector_cosine_ops);
 
