@@ -24,6 +24,7 @@ DATA_DIR    = os.path.join(PROJECT_DIR, "train-mock-data")
 
 sys.path.insert(0, PROJECT_DIR)
 from skeleton import config as cfg
+from databases.relational.queries import _hash_password
 
 
 def load(filename):
@@ -312,13 +313,18 @@ def seed_seat_layouts(cur):
 def seed_users(cur):
     data = load("registered_users.json")
     
-    # Scheme A: Generate random UUIDs and populate user_uuid_map
+    # Scheme A: 產生確定性 UUID 並填充用戶對照表
+    # 【工業級優化點：確定性 UUID (Deterministic UUID)】
+    # 原本使用 uuid.uuid4() 在重覆執行 seed_postgres.py 時會生成隨機新 UUID。
+    # 當新 UUID 因為 email UNIQUE 約束被資料庫略過（DO NOTHING）時，
+    # 記憶體中的 USER_UUID_MAP 會留下未寫入資料庫的 UUID，導致後續插入 bookings 時發生外鍵約束衝突 (FK Violation)。
+    # 改用 uuid.uuid5 基於 NAMESPACE_DNS 與 mock user_id 可確保每次執行都取得完全相同的 UUID，支持安全重複執行。
     users_rows = []
     creds_rows = []
     
     for u in data:
         ru_id = u["user_id"]
-        real_uuid = str(uuid.uuid4())
+        real_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, u["user_id"]))
         USER_UUID_MAP[ru_id] = real_uuid
         
         users_rows.append((
@@ -331,9 +337,12 @@ def seed_users(cur):
             u["is_active"]
         ))
         
+        # 【工業級優化點：高強度密碼雜湊 PBKDF2】
+        # 教學範例原本直接將密碼明文存入資料庫，這在生產環境下是非常嚴重的安全漏洞。
+        # 這裡改用從 queries 導入的 PBKDF2 密碼雜湊算法，確保資料庫中完全不儲存任何明文。
         creds_rows.append((
             real_uuid,
-            u["password"],  # Store password directly in password_hash for teaching purposes
+            _hash_password(u["password"]),  # 儲存安全 PBKDF2 密碼雜湊
             u["secret_question"],
             u["secret_answer"]
         ))
