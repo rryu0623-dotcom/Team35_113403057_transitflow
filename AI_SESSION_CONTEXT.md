@@ -80,17 +80,6 @@ TransitFlow is a Python-based AI chat assistant for a fictional transit operator
 --  Apply your schema with:
 --    docker-compose down -v && docker-compose up -d
 -- ============================================================
-DROP TYPE IF EXISTS booking_status CASCADE;
-DROP TYPE IF EXISTS travel_status CASCADE;
-DROP TYPE IF EXISTS payment_status CASCADE;
-DROP TYPE IF EXISTS transit_direction CASCADE;
-DROP TYPE IF EXISTS rail_service_type CASCADE;
-DROP TYPE IF EXISTS fare_class CASCADE;
-DROP TYPE IF EXISTS rail_ticket_type CASCADE;
-DROP TYPE IF EXISTS metro_ticket_type CASCADE;
-DROP TYPE IF EXISTS pass_type CASCADE;
-DROP TYPE IF EXISTS payment_method CASCADE;
-
 -- Option 2: PostgreSQL native ENUM (fast, enforced at type level)
 CREATE TYPE booking_status AS ENUM ('confirmed', 'completed', 'cancelled');
 CREATE TYPE travel_status AS ENUM ('completed', 'cancelled');
