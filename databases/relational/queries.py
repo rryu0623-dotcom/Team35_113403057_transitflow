@@ -385,15 +385,15 @@ def query_user_bookings(user_email: str) -> dict:
                 return {"national_rail": [], "metro": []}
             user_uuid = user_row["user_id"]
             
-            # 2. Query national rail bookings
+            # 2. Query national rail bookings (Snapshot-optimized & decoupled resilient)
             cur.execute("""
                 SELECT 
                     b.booking_id,
                     b.schedule_id,
-                    s.line,
-                    s.service_type,
-                    so.name AS origin_station,
-                    sd.name AS destination_station,
+                    COALESCE(s.line, 'decoupled') AS line,
+                    COALESCE(s.service_type, 'normal') AS service_type,
+                    b.origin_station_name AS origin_station,
+                    b.destination_station_name AS destination_station,
                     b.travel_date::text AS travel_date,
                     b.departure_time::text AS departure_time,
                     b.ticket_type,
@@ -405,34 +405,30 @@ def query_user_bookings(user_email: str) -> dict:
                     b.status,
                     b.booked_at::text AS booked_at
                 FROM national_rail_bookings b
-                JOIN national_rail_schedules s ON b.schedule_id = s.schedule_id
-                JOIN national_rail_stations so ON b.origin_station_id = so.station_id
-                JOIN national_rail_stations sd ON b.destination_station_id = sd.station_id
+                LEFT JOIN national_rail_schedules s ON b.schedule_id = s.schedule_id
                 WHERE b.user_id = %s
                 ORDER BY b.travel_date DESC, b.departure_time DESC;
             """, (user_uuid,))
             rail_bookings = [dict(row) for row in cur.fetchall()]
             
-            # 3. Query metro travel history
+            # 3. Query metro travel history (Snapshot-optimized, pass_id_ref alignment & decoupled resilient)
             cur.execute("""
                 SELECT 
                     h.trip_id,
                     h.schedule_id,
-                    s.line,
-                    so.name AS origin_station,
-                    sd.name AS destination_station,
+                    COALESCE(s.line, 'decoupled') AS line,
+                    h.origin_station_name AS origin_station,
+                    h.destination_station_name AS destination_station,
                     h.travel_date::text AS travel_date,
                     h.ticket_type,
-                    h.day_pass_ref,
+                    h.pass_id_ref AS day_pass_ref,
                     h.stops_travelled,
                     h.amount_usd::float AS amount_usd,
                     h.status,
                     h.purchased_at::text AS purchased_at,
                     h.travelled_at::text AS travelled_at
                 FROM metro_travel_history h
-                JOIN metro_schedules s ON h.schedule_id = s.schedule_id
-                JOIN metro_stations so ON h.origin_station_id = so.station_id
-                JOIN metro_stations sd ON h.destination_station_id = sd.station_id
+                LEFT JOIN metro_schedules s ON h.schedule_id = s.schedule_id
                 WHERE h.user_id = %s
                 ORDER BY h.travel_date DESC, h.trip_id DESC;
             """, (user_uuid,))
@@ -814,9 +810,9 @@ def register_user(
         
         # 2. Insert into user_credentials
         cur.execute("""
-            INSERT INTO user_credentials (user_id, password_hash, secret_question, secret_answer, updated_at)
+            INSERT INTO user_credentials (user_id, password_hash, secret_question, secret_answer_hash, updated_at)
             VALUES (%s, %s, %s, %s, NOW());
-        """, (user_uuid, _hash_password(password), secret_question, secret_answer))
+        """, (user_uuid, _hash_password(password), secret_question, _hash_password(secret_answer)))
         
         conn.commit()
         return True, user_uuid
@@ -874,7 +870,7 @@ def get_user_secret_question(email: str) -> Optional[str]:
 def verify_secret_answer(email: str, answer: str) -> bool:
     """Return True if the provided answer matches the stored secret answer (case-insensitive)."""
     sql = """
-        SELECT c.secret_answer
+        SELECT c.secret_answer_hash
         FROM registered_users u
         JOIN user_credentials c ON u.user_id = c.user_id
         WHERE u.email = %s AND u.is_active = TRUE;
@@ -885,7 +881,7 @@ def verify_secret_answer(email: str, answer: str) -> bool:
             row = cur.fetchone()
             if not row:
                 return False
-            return row[0].strip().lower() == answer.strip().lower()
+            return row[0] == _hash_password(answer)
 
 
 def update_password(email: str, new_password: str) -> bool:
