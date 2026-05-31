@@ -5,7 +5,6 @@ Usage:
     python skeleton/seed_postgres.py
 
 Run AFTER docker-compose up -d.
-You must first design and create your tables in databases/relational/schema.sql.
 Safe to re-run: implement your inserts with ON CONFLICT DO NOTHING.
 """
 
@@ -61,6 +60,17 @@ def insert_many(cur, table, columns, rows, batch_size=2000):
 
 # ── global session state for random UUID mapping (Scheme A) ──────────────────
 USER_UUID_MAP = {}
+
+
+def to_uuid(id_str):
+    """Deterministically convert any string ID like 'RU01' to a UUID format."""
+    if not id_str:
+        return None
+    try:
+        return str(uuid.UUID(id_str))
+    except ValueError:
+        pass
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"transitflow.{id_str}"))
 
 
 # ── seeders ──────────────────────────────────────────────────────────────────
@@ -561,16 +571,33 @@ def main():
 
     try:
         print("Seeding tables (dependency order):")
+        
+        print("- Metro stations...")
         seed_metro_stations(cur)
+        
+        print("- National rail stations...")
         seed_national_rail_stations(cur)
+        
+        print("- Metro schedules...")
         seed_metro_schedules(cur)
         seed_national_rail_schedules(cur)  # Must be seeded before seat layouts due to schedule_id FK reference
         seed_seat_layouts(cur)
+        
+        print("- Users...")
         seed_users(cur)
+        
+        print("- Bookings...")
         seed_national_rail_bookings(cur)
+        
+        print("- Metro travels...")
         seed_metro_travels(cur)
+        
+        print("- Payments...")
         seed_payments(cur)
+        
+        print("- Feedback...")
         seed_feedback(cur)
+        
         conn.commit()
         print("\nAll done. Database seeded successfully.")
     except Exception as e:

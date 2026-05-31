@@ -6,9 +6,6 @@ Run once after starting Docker:
 Loads station and network data from train-mock-data/:
   - metro_stations.json         — city metro stations and adjacencies
   - national_rail_stations.json — national rail stations and adjacencies
-
-Design your graph schema (node labels, relationship types, properties)
-based on the data in these files, then implement the seed() function below.
 """
 
 import json
@@ -24,11 +21,9 @@ _DATA_DIR = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "train-mock-data")
 )
 
-
 def _load(filename):
     with open(os.path.join(_DATA_DIR, filename), encoding="utf-8") as f:
         return json.load(f)
-
 
 def seed():
     metro_stations = _load("metro_stations.json")
@@ -40,27 +35,64 @@ def seed():
         session.run("MATCH (n) DETACH DELETE n")
         print("  Cleared existing graph data")
 
-        # TODO: Design your node labels and create metro station nodes.
-        # Each station has: station_id, name, lines, and interchange info.
-        # See metro_stations.json for the full data structure.
+        # 1. 建立 MetroStation 節點
+        print("  Creating MetroStation nodes...")
+        session.run("""
+            UNWIND $stations AS s
+            CREATE (n:MetroStation {
+                id: s.station_id,
+                name: s.name,
+                lines: s.lines
+            })
+        """, stations=metro_stations)
 
-        # TODO: Design your node labels and create national rail station nodes.
-        # See national_rail_stations.json for the full data structure.
+        # 2. 建立 NationalRailStation 節點
+        print("  Creating NationalRailStation nodes...")
+        session.run("""
+            UNWIND $stations AS s
+            CREATE (n:NationalRailStation {
+                id: s.station_id,
+                name: s.name,
+                lines: s.lines
+            })
+        """, stations=rail_stations)
 
-        # TODO: Design your relationship types and create metro links.
-        # Each station lists its adjacent_stations with line and travel_time_min.
-        # Consider what properties to store on the relationship.
+        # 3. 建立 METRO_LINK 關係 (捷運路線)
+        print("  Creating METRO_LINK relationships...")
+        session.run("""
+            UNWIND $stations AS s
+            MATCH (a:MetroStation {id: s.station_id})
+            UNWIND s.adjacent_stations AS adj
+            MATCH (b:MetroStation {id: adj.station_id})
+            MERGE (a)-[r:METRO_LINK {line: adj.line}]->(b)
+            SET r.travel_time_min = adj.travel_time_min
+        """, stations=metro_stations)
 
-        # TODO: Design your relationship types and create national rail links.
+        # 4. 建立 RAIL_LINK 關係 (國鐵路線)
+        print("  Creating RAIL_LINK relationships...")
+        session.run("""
+            UNWIND $stations AS s
+            MATCH (a:NationalRailStation {id: s.station_id})
+            UNWIND s.adjacent_stations AS adj
+            MATCH (b:NationalRailStation {id: adj.station_id})
+            MERGE (a)-[r:RAIL_LINK {line: adj.line}]->(b)
+            SET r.travel_time_min = adj.travel_time_min
+        """, stations=rail_stations)
 
-        # TODO: Create interchange relationships between metro and rail stations.
-        # Interchange info is in the is_interchange_national_rail field
-        # of metro_stations.json.
+        # 5. 建立 INTERCHANGE_TO 轉乘關係 (雙向)
+        print("  Creating INTERCHANGE_TO relationships...")
+        session.run("""
+            UNWIND $stations AS s
+            WITH s WHERE s.is_interchange_national_rail = true AND s.interchange_national_rail_station_id IS NOT NULL
+            MATCH (m:MetroStation {id: s.station_id})
+            MATCH (nr:NationalRailStation {id: s.interchange_national_rail_station_id})
+            MERGE (m)-[:INTERCHANGE_TO]->(nr)
+            MERGE (nr)-[:INTERCHANGE_TO]->(m)
+        """, stations=metro_stations)
 
     driver.close()
     print("\nNeo4j graph seeded successfully.")
     print("   Open http://localhost:7475 to explore the graph.")
-
 
 if __name__ == "__main__":
     print("Connecting to Neo4j...")
