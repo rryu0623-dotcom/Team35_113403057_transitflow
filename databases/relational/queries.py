@@ -26,11 +26,11 @@ import uuid
 import json
 import random
 import string
-from datetime import datetime, ti
+from datetime import datetime, timezone
 
 import psycopg2
 import psycopg2.extras
-mezone
+
 from typing import Optional
 from skeleton.config import PG_DSN, VECTOR_TOP_K, VECTOR_SIMILARITY_THRESHOLD
 
@@ -78,17 +78,23 @@ def query_national_rail_availability(
         SELECT 
             s.schedule_id, s.line, s.service_type, s.direction,
             s.first_train_time::text, s.last_train_time::text,
-            o.stop_order AS origin_order,
-            d.stop_order AS destination_order,
-            (d.travel_time_from_origin_min - o.travel_time_from_origin_min) AS travel_time_min,
-            (d.stop_order - o.stop_order) AS stops_travelled
+            o.ord AS origin_order,
+            d.ord AS destination_order,
+            ((s.travel_time_from_origin_min->>(d.ord - 1))::int - (s.travel_time_from_origin_min->>(o.ord - 1))::int) AS travel_time_min,
+            (d.ord - o.ord) AS stops_travelled
         FROM national_rail_schedules s
-        JOIN national_rail_schedule_stops o ON s.schedule_id = o.schedule_id
-        JOIN national_rail_schedule_stops d ON s.schedule_id = d.schedule_id
+        CROSS JOIN LATERAL (
+            SELECT ordinality::int AS ord 
+            FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
+            WHERE value = %s LIMIT 1
+        ) o
+        CROSS JOIN LATERAL (
+            SELECT ordinality::int AS ord 
+            FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
+            WHERE value = %s LIMIT 1
+        ) d
         WHERE s.is_active = TRUE
-          AND o.station_id = %s
-          AND d.station_id = %s
-          AND o.stop_order < d.stop_order
+          AND o.ord < d.ord
         ORDER BY s.first_train_time
     """
     with _connect() as conn:
@@ -125,17 +131,23 @@ def query_metro_schedules(origin_id: str, destination_id: str) -> list[dict]:
     sql = """
         SELECT 
             s.schedule_id, s.line, s.direction,
-            o.stop_order AS origin_order,
-            d.stop_order AS destination_order,
-            (d.travel_time_from_origin_min - o.travel_time_from_origin_min) AS travel_time_min,
-            (d.stop_order - o.stop_order) AS stops_travelled
+            o.ord AS origin_order,
+            d.ord AS destination_order,
+            ((s.travel_time_from_origin_min->>(d.ord - 1))::int - (s.travel_time_from_origin_min->>(o.ord - 1))::int) AS travel_time_min,
+            (d.ord - o.ord) AS stops_travelled
         FROM metro_schedules s
-        JOIN metro_schedule_stops o ON s.schedule_id = o.schedule_id
-        JOIN metro_schedule_stops d ON s.schedule_id = d.schedule_id
+        CROSS JOIN LATERAL (
+            SELECT ordinality::int AS ord 
+            FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
+            WHERE value = %s LIMIT 1
+        ) o
+        CROSS JOIN LATERAL (
+            SELECT ordinality::int AS ord 
+            FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
+            WHERE value = %s LIMIT 1
+        ) d
         WHERE s.is_active = TRUE
-          AND o.station_id = %s
-          AND d.station_id = %s
-          AND o.stop_order < d.stop_order
+          AND o.ord < d.ord
     """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -171,9 +183,11 @@ def query_available_seats(
     sql = """
         SELECT s.seat_id, s.coach, s.row, s.seat_column AS column
         FROM national_rail_seats s
-        WHERE s.schedule_id = %s AND s.fare_class = %s::fare_class
-          AND s.seat_id NOT IN (
-              SELECT b.seat_id 
+        JOIN national_rail_coaches c ON s.layout_id = c.layout_id AND s.coach = c.coach
+        JOIN national_rail_seat_layouts l ON c.layout_id = l.layout_id
+        WHERE l.schedule_id = %s AND c.fare_class = %s::fare_class
+          AND (s.coach, s.seat_id) NOT IN (
+              SELECT b.coach, b.seat_id 
               FROM national_rail_bookings b
               WHERE b.schedule_id = %s 
                 AND b.travel_date = %s
@@ -308,17 +322,26 @@ def execute_booking(
     conn.autocommit = False
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            # 1. Retrieve route and station information
+            # 1. Retrieve route and station information (JSONB version)
             cur.execute("""
                 SELECT 
                     s.service_type,
-                    o.travel_time_from_origin_min AS o_time,
-                    (d.stop_order - o.stop_order) AS stops
+                    (s.travel_time_from_origin_min->>(o.ord - 1))::int AS o_time,
+                    (d.ord - o.ord) AS stops
                 FROM national_rail_schedules s
-                JOIN national_rail_schedule_stops o ON s.schedule_id = o.schedule_id
-                JOIN national_rail_schedule_stops d ON s.schedule_id = d.schedule_id
-                WHERE s.schedule_id = %s AND o.station_id = %s AND d.station_id = %s
-            """, (schedule_id, origin_station_id, destination_station_id))
+                CROSS JOIN LATERAL (
+                    SELECT ordinality::int AS ord 
+                    FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
+                    WHERE value = %s LIMIT 1
+                ) o
+                CROSS JOIN LATERAL (
+                    SELECT ordinality::int AS ord 
+                    FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
+                    WHERE value = %s LIMIT 1
+                ) d
+                WHERE s.schedule_id = %s 
+                  AND o.ord < d.ord
+            """, (origin_station_id, destination_station_id, schedule_id))
             sched_info = cur.fetchone()
             if not sched_info or sched_info['stops'] <= 0:
                 raise ValueError("Invalid route or station order.")
@@ -361,9 +384,10 @@ def execute_booking(
             
             if seat_id.lower() == 'any':
                 cur.execute(seat_query_base + """
-                  AND s.seat_id NOT IN (
-                      SELECT seat_id FROM national_rail_bookings
+                  AND (s.coach, s.seat_id) NOT IN (
+                      SELECT coach, seat_id FROM national_rail_bookings
                       WHERE schedule_id = %s AND travel_date = %s AND status IN ('confirmed', 'completed')
+                      AND deleted_at IS NULL
                   )
                   LIMIT 1
                 """, (schedule_id, fare_class, schedule_id, travel_date))
@@ -433,8 +457,45 @@ def execute_cancellation(booking_id: str, user_id: str) -> tuple[bool, dict | st
                 raise ValueError(f"Cannot cancel booking with status: {booking['status']}")
             
             # Simplified refund logic (in practice, can add time-based checks for RF001/RF002 here)
-            refund_amount = booking['amount_usd']
-            policy_note = f"Refund processed based on {booking['service_type']} policy."
+            # 2. Calculate hours remaining until departure
+            departure_datetime = datetime.combine(booking['travel_date'], booking['departure_time'])
+            now = datetime.now()
+            time_diff = departure_datetime - now
+            hours_before = time_diff.total_seconds() / 3600.0
+
+            # 3. Calculate refund percentage and admin fee based on RF001 / RF002 rules
+            amount = float(booking['amount_usd'])
+            service_type = booking['service_type']
+            refund_percent = 0.0
+            admin_fee = 0.0
+            policy_note = ""
+
+            if hours_before <= 0:
+                # Already departed, treat as No-show
+                refund_percent = 0.0
+                policy_note = "No refund issued for no-shows or after departure."
+            elif service_type == 'normal':
+                # RF001 logic
+                if hours_before >= 48:
+                    refund_percent = 1.00; admin_fee = 0.00; policy_note = "Early cancellation (48+ hrs): 100% refund."
+                elif 24 <= hours_before < 48:
+                    refund_percent = 0.75; admin_fee = 0.50; policy_note = "Standard cancellation (24-48 hrs): 75% refund."
+                elif 2 <= hours_before < 24:
+                    refund_percent = 0.50; admin_fee = 0.50; policy_note = "Late cancellation (2-24 hrs): 50% refund."
+                else:
+                    refund_percent = 0.00; policy_note = "Less than 2 hours before departure: No refund."
+            elif service_type == 'express':
+                # RF002 logic
+                if hours_before >= 48:
+                    refund_percent = 1.00; admin_fee = 1.00; policy_note = "Early cancellation (48+ hrs): 100% refund."
+                elif 24 <= hours_before < 48:
+                    refund_percent = 0.50; admin_fee = 1.00; policy_note = "Late cancellation (24-48 hrs): 50% refund."
+                else:
+                    refund_percent = 0.00; policy_note = "Less than 24 hours before departure: No refund."
+
+            # Calculate final refund amount (ensure not below 0)
+            calculated_refund = (amount * refund_percent) - admin_fee
+            refund_amount = max(0.0, round(calculated_refund, 2))
             
             # 2. Update booking status
             cur.execute("""
@@ -552,7 +613,7 @@ def verify_secret_answer(email: str, answer: str) -> bool:
             cur.execute(sql, (email,))
             row = cur.fetchone()
             if row:
-                # 配合教學文件的單純字串比對
+                # Simple string comparison to match teaching materials
                 return row[0].lower() == answer.lower()
             return False
 
