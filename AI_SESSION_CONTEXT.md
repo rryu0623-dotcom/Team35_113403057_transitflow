@@ -131,5 +131,21 @@ TODO — add a prompt here after your schema design workshop
 
 ### Query implementation prompt that worked:
 ```
-TODO — add after implementing your first function
+你現在是 TransitFlow 專案的資料庫開發專家。
+請幫我實作以下 Python 函數。在撰寫程式碼時，請你「嚴格」遵守以下所有專案規則，若違反任何一條將會導致系統崩潰：
+
+【核心規則】
+1. 嚴格遵守 Schema：只能使用我下方提供的資料表、節點(Node)、關係(Relationship)與欄位名稱，**絕對不可以憑空捏造**任何欄位或表名。
+2. 防範注入攻擊：
+   - 若為 SQL (PostgreSQL)：所有的變數綁定「必須」使用 `%s` 佔位符（例如 `WHERE id = %s`），「嚴禁」使用 f-string 拼接查詢變數。
+   - 若為 Cypher (Neo4j)：所有的變數綁定「必須」使用 `$param` 語法（例如 `WHERE s.station_id = $station_id`）。
+3. 函數簽名與回傳型態：
+   - 函數名稱、參數名稱、預設值與 Type Hints (例如 `-> list[dict]`) 必須與 Stub 完全一致。
+   - 查詢不到結果時，若回傳型態為 `list` 則回傳 `[]`；若為 `Optional` 則回傳 `None`，不要拋出 Exception。
+4. 連線管理規範：
+   - PostgreSQL 唯讀查詢：使用 `with get_db_connection() as conn:` 搭配 `with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:`。
+   - PostgreSQL 寫入操作 (execute_*)：必須包含 `try...except` 區塊，並明確呼叫 `conn.commit()` 與 `conn.rollback()` 保證交易原子性 (Transaction ACID)。
+   - Neo4j 查詢：使用 `with _driver() as driver:` 搭配 `with driver.session() as session:`，回傳結果請轉換為 dict。
+5. 軟刪除 (Soft Delete)：若查詢的資料表含有 `deleted_at` 或 `is_active` 欄位，請務必在 WHERE 條件中過濾（例如 `deleted_at IS NULL` 或 `is_active = TRUE`）。
 ```
+---
