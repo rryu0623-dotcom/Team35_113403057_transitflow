@@ -35,11 +35,67 @@ from typing import Optional
 from skeleton.config import PG_DSN, VECTOR_TOP_K, VECTOR_SIMILARITY_THRESHOLD
 
 
+# ==============================================================================
+#  工業級優化點：資料庫連線池 (Database Connection Pooling)
+# ==============================================================================
+# 原本的 _connect() 在每次查詢時都會向資料庫重新開啟一個實體 TCP 連線，
+# 這在高併發/高流量的生產環境中會造成巨大的延遲與連線數耗盡 (Connection Exhaustion) 的崩潰。
+# 這裡引入 ThreadedConnectionPool (最小 1 個連線，最大 20 個連線)。
+# 
+# 為了完美向後相容原本的 context manager (with _connect() as conn) 與手動 conn.close() 的寫法，
+# 我們設計了 ConnectionProxy 代理類別：
+# 1. 攔截 close()：呼叫 close() 時，不會真正關閉連線，而是安全地將連線歸還到 pool 中。
+# 2. 自動回收：當 context manager (__exit__) 結束時，自動執行 commit/rollback 並安全回收連線。
+# 3. 透明轉發：所有其他屬性與方法調用皆透明地委託給真實的 psycopg2 connection 物件。
+# ==============================================================================
+from contextlib import contextmanager
+from psycopg2.pool import ThreadedConnectionPool
+
+# 全域 thread-safe 連線池 (min 1, max 20 connections)
+_pool = ThreadedConnectionPool(1, 20, PG_DSN)
+
+class ConnectionProxy:
+    def __init__(self, conn, pool):
+        self._conn = conn
+        self._pool = pool
+        
+    def __getattr__(self, name):
+        # 透明轉發所有屬性與方法給真實的 psycopg2 連線物件
+        return getattr(self._conn, name)
+        
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            self._conn.__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            # 區塊退出時自動回收連線
+            self.close()
+        
+    def close(self):
+        try:
+            # 將實體連線歸還給 ThreadedConnectionPool，而不是真的銷毀它
+            self._pool.putconn(self._conn)
+        except Exception:
+            pass
+
+
 def _connect():
-    """Return a new psycopg2 connection with autocommit enabled."""
-    conn = psycopg2.connect(PG_DSN)
+    """從全域 ThreadedConnectionPool 借用一個連線，並包裝於 ConnectionProxy 中傳回。"""
+    conn = _pool.getconn()
     conn.autocommit = True
-    return conn
+    return ConnectionProxy(conn, _pool)
+
+
+def _hash_password(password: str) -> str:
+    """Hash password securely using PBKDF2 with SHA-256 and a static salt (built-in, zero dependencies)."""
+    import hashlib
+    import binascii
+    salt = b"transitflow_salt_secure_123"
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100000)
+    return binascii.hexlify(dk).decode()
 
 
 def _gen_booking_id() -> str:
@@ -217,11 +273,11 @@ def auto_select_adjacent_seats(available_seats: list[dict], count: int) -> list[
         return [s["seat_id"] for s in available_seats[:count]]
 
     from collections import defaultdict
-    rows: dict[int, list[dict]] = defaultdict(list)
+    rows: dict[tuple[str, int], list[dict]] = defaultdict(list)
     for seat in available_seats:
-        rows[seat["row"]].append(seat)
+        rows[(seat["coach"], seat["row"])].append(seat)
 
-    for row_seats in sorted(rows.values(), key=lambda s: s[0]["row"]):
+    for row_seats in sorted(rows.values(), key=lambda s: (s[0]["coach"], s[0]["row"])):
         if len(row_seats) >= count:
             return [s["seat_id"] for s in row_seats[:count]]
 
