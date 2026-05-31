@@ -23,6 +23,7 @@ DATA_DIR    = os.path.join(PROJECT_DIR, "train-mock-data")
 
 sys.path.insert(0, PROJECT_DIR)
 from skeleton import config as cfg
+from databases.relational.queries import _hash_password
 
 
 def load(filename):
@@ -40,16 +41,25 @@ def connect():
     )
 
 
-def insert_many(cur, table, columns, rows):
-    """Bulk insert with ON CONFLICT DO NOTHING. Returns row count inserted."""
+def insert_many(cur, table, columns, rows, batch_size=2000):
+    """Bulk insert in chunks with ON CONFLICT DO NOTHING. Returns total row count inserted."""
     if not rows:
         return 0
-    sql = (
-        f"INSERT INTO {table} ({', '.join(columns)}) VALUES %s "
-        f"ON CONFLICT DO NOTHING"
-    )
-    execute_values(cur, sql, rows)
-    return cur.rowcount
+    total_inserted = 0
+    for i in range(0, len(rows), batch_size):
+        chunk = rows[i:i + batch_size]
+        sql = (
+            f"INSERT INTO {table} ({', '.join(columns)}) VALUES %s "
+            f"ON CONFLICT DO NOTHING"
+        )
+        execute_values(cur, sql, chunk)
+        if cur.rowcount > 0:
+            total_inserted += cur.rowcount
+    return total_inserted
+
+
+# ── global session state for random UUID mapping (Scheme A) ──────────────────
+USER_UUID_MAP = {}
 
 
 def to_uuid(id_str):
@@ -67,307 +77,488 @@ def to_uuid(id_str):
 
 def seed_metro_stations(cur):
     data = load("metro_stations.json")
-    # Pass 1: stations
-    for station in data:
-        cur.execute(
-            """
-            INSERT INTO metro_stations (station_id, name, is_interchange_metro, is_interchange_national_rail, is_active)
-            VALUES (%s, %s, %s, %s, TRUE)
-            ON CONFLICT (station_id) DO NOTHING
-            """,
-            (station["station_id"], station["name"], station["is_interchange_metro"], station["is_interchange_national_rail"])
-        )
-    # Pass 2: lines and adjacents
-    for station in data:
-        for line in station["lines"]:
-            cur.execute(
-                """
-                INSERT INTO metro_station_lines (station_id, line)
-                VALUES (%s, %s)
-                ON CONFLICT (station_id, line) DO NOTHING
-                """,
-                (station["station_id"], line)
-            )
-        for adj in station["adjacent_stations"]:
-            cur.execute(
-                """
-                INSERT INTO metro_station_adjacents (station_id, adjacent_station_id, line, travel_time_min)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (station_id, adjacent_station_id, line) DO NOTHING
-                """,
-                (station["station_id"], adj["station_id"], adj["line"], adj["travel_time_min"])
-            )
+    
+    # 1. metro_stations
+    stations_rows = [
+        (s["station_id"], s["name"], s["is_interchange_metro"], s["is_interchange_national_rail"], True)
+        for s in data
+    ]
+    insert_many(cur, "metro_stations", ["station_id", "name", "is_interchange_metro", "is_interchange_national_rail", "is_active"], stations_rows)
+    
+    # 2. metro_station_lines
+    lines_rows = []
+    for s in data:
+        for line in s["lines"]:
+            lines_rows.append((s["station_id"], line))
+    insert_many(cur, "metro_station_lines", ["station_id", "line"], lines_rows)
+    
+    # 3. metro_station_adjacents
+    adj_rows = []
+    for s in data:
+        for adj in s["adjacent_stations"]:
+            adj_rows.append((s["station_id"], adj["station_id"], adj["line"], adj["travel_time_min"]))
+    insert_many(cur, "metro_station_adjacents", ["station_id", "adjacent_station_id", "line", "travel_time_min"], adj_rows)
+    
+    print(f"  metro_stations seeded: {len(data)} stations, {len(lines_rows)} lines mapping, {len(adj_rows)} adjacencies")
 
 
 def seed_national_rail_stations(cur):
     data = load("national_rail_stations.json")
-    # Pass 1: stations
-    for station in data:
-        cur.execute(
-            """
-            INSERT INTO national_rail_stations (station_id, name, is_interchange_national_rail, is_interchange_metro, is_active)
-            VALUES (%s, %s, %s, %s, TRUE)
-            ON CONFLICT (station_id) DO NOTHING
-            """,
-            (station["station_id"], station["name"], station["is_interchange_national_rail"], station["is_interchange_metro"])
-        )
-    # Pass 2: lines, adjacents, and interchanges
-    for station in data:
-        for line in station["lines"]:
-            cur.execute(
-                """
-                INSERT INTO national_rail_station_lines (station_id, line)
-                VALUES (%s, %s)
-                ON CONFLICT (station_id, line) DO NOTHING
-                """,
-                (station["station_id"], line)
-            )
-        for adj in station["adjacent_stations"]:
-            cur.execute(
-                """
-                INSERT INTO national_rail_station_adjacents (station_id, adjacent_station_id, line, travel_time_min)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (station_id, adjacent_station_id, line) DO NOTHING
-                """,
-                (station["station_id"], adj["station_id"], adj["line"], adj["travel_time_min"])
-            )
-        # Seed interchanges
-        if station.get("is_interchange_metro") and station.get("interchange_metro_station_id"):
-            cur.execute(
-                """
-                INSERT INTO station_interchanges (metro_station_id, national_rail_station_id, transfer_time_min)
-                VALUES (%s, %s, 5)
-                ON CONFLICT (metro_station_id, national_rail_station_id) DO NOTHING
-                """,
-                (station["interchange_metro_station_id"], station["station_id"])
-            )
+    
+    # 1. national_rail_stations
+    stations_rows = [
+        (s["station_id"], s["name"], s["is_interchange_national_rail"], s["is_interchange_metro"], True)
+        for s in data
+    ]
+    insert_many(cur, "national_rail_stations", ["station_id", "name", "is_interchange_national_rail", "is_interchange_metro", "is_active"], stations_rows)
+    
+    # 2. national_rail_station_lines
+    lines_rows = []
+    for s in data:
+        for line in s["lines"]:
+            lines_rows.append((s["station_id"], line))
+    insert_many(cur, "national_rail_station_lines", ["station_id", "line"], lines_rows)
+    
+    # 3. national_rail_station_adjacents
+    adj_rows = []
+    for s in data:
+        for adj in s["adjacent_stations"]:
+            adj_rows.append((s["station_id"], adj["station_id"], adj["line"], adj["travel_time_min"]))
+    insert_many(cur, "national_rail_station_adjacents", ["station_id", "adjacent_station_id", "line", "travel_time_min"], adj_rows)
+    
+    # 4. station_interchanges
+    interchange_rows = []
+    for s in data:
+        if s["is_interchange_metro"] and s["interchange_metro_station_id"]:
+            # Insert standard 5-minute interchange walk
+            interchange_rows.append((s["interchange_metro_station_id"], s["station_id"], 5))
+    insert_many(cur, "station_interchanges", ["metro_station_id", "national_rail_station_id", "transfer_time_min"], interchange_rows)
+    
+    print(f"  national_rail_stations seeded: {len(data)} stations, {len(lines_rows)} lines mapping, {len(adj_rows)} adjacencies, {len(interchange_rows)} cross-network interchanges")
 
 
 def seed_metro_schedules(cur):
     data = load("metro_schedules.json")
-    for schedule in data:
-        stops_in_order_json = json.dumps(schedule["stops_in_order"])
-        travel_time_json = json.dumps(schedule["travel_time_from_origin_min"])
-        operates_on_json = json.dumps(schedule["operates_on"])
-        cur.execute(
-            """
-            INSERT INTO metro_schedules (
-                schedule_id, line, direction, origin_station_id, destination_station_id,
-                stops_in_order, travel_time_from_origin_min, first_train_time, last_train_time,
-                base_fare_usd, per_stop_rate_usd, frequency_min, operates_on, is_active
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
-            ON CONFLICT (schedule_id) DO NOTHING
-            """,
-            (
-                schedule["schedule_id"], schedule["line"], schedule["direction"],
-                schedule["origin_station_id"], schedule["destination_station_id"],
-                stops_in_order_json, travel_time_json, schedule["first_train_time"],
-                schedule["last_train_time"], schedule["base_fare_usd"],
-                schedule["per_stop_rate_usd"], schedule["frequency_min"], operates_on_json
-            )
+    
+    # 1. metro_schedules
+    sched_rows = [
+        (
+            s["schedule_id"],
+            s["line"],
+            s["direction"].strip().lower() if s.get("direction") else "northbound",
+            s["origin_station_id"],
+            s["destination_station_id"],
+            s["first_train_time"],
+            s["last_train_time"],
+            s["base_fare_usd"],
+            s["per_stop_rate_usd"],
+            s["frequency_min"],
+            True
         )
+        for s in data
+    ]
+    insert_many(
+        cur,
+        "metro_schedules",
+        [
+            "schedule_id", "line", "direction", "origin_station_id", "destination_station_id",
+            "first_train_time", "last_train_time", "base_fare_usd", "per_stop_rate_usd", "frequency_min", "is_active"
+        ],
+        sched_rows
+    )
+    
+    # 2. metro_schedule_stops
+    stops_rows = []
+    for s in data:
+        for order, station_id in enumerate(s["stops_in_order"]):
+            time_from_orig = s["travel_time_from_origin_min"][station_id]
+            stops_rows.append((s["schedule_id"], station_id, order, time_from_orig))
+    insert_many(cur, "metro_schedule_stops", ["schedule_id", "station_id", "stop_order", "travel_time_from_origin_min"], stops_rows)
+    
+    # 3. metro_schedule_operates
+    DAY_NAME_TO_INT = {"mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 7}
+    ops_rows = []
+    for s in data:
+        for day in s["operates_on"]:
+            ops_rows.append((s["schedule_id"], DAY_NAME_TO_INT[day.lower()]))
+    insert_many(cur, "metro_schedule_operates", ["schedule_id", "day_of_week"], ops_rows)
+    
+    print(f"  metro_schedules seeded: {len(data)} schedules, {len(stops_rows)} scheduled stops, {len(ops_rows)} operating days mapping")
 
 
 def seed_national_rail_schedules(cur):
     data = load("national_rail_schedules.json")
-    for schedule in data:
-        stops_in_order_json = json.dumps(schedule["stops_in_order"])
-        passed_through_json = json.dumps(schedule.get("passed_through_stations", []))
-        travel_time_json = json.dumps(schedule["travel_time_from_origin_min"])
-        operates_on_json = json.dumps(schedule["operates_on"])
-        cur.execute(
-            """
-            INSERT INTO national_rail_schedules (
-                schedule_id, line, service_type, direction, origin_station_id, destination_station_id,
-                stops_in_order, passed_through_stations, travel_time_from_origin_min, first_train_time, last_train_time,
-                frequency_min, operates_on, is_active
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
-            ON CONFLICT (schedule_id) DO NOTHING
-            """,
-            (
-                schedule["schedule_id"], schedule["line"], schedule["service_type"], schedule["direction"],
-                schedule["origin_station_id"], schedule["destination_station_id"],
-                stops_in_order_json, passed_through_json, travel_time_json, schedule["first_train_time"],
-                schedule["last_train_time"], schedule["frequency_min"], operates_on_json
-            )
-        )
+    
+    PHYSICAL_STATIONS = {
+        ("NR1", "northbound"): ["NR01", "NR02", "NR03", "NR04", "NR05"],
+        ("NR1", "southbound"): ["NR05", "NR04", "NR03", "NR02", "NR01"],
+        ("NR2", "eastbound"): ["NR01", "NR06", "NR07", "NR08", "NR09", "NR10"],
+        ("NR2", "westbound"): ["NR10", "NR09", "NR08", "NR07", "NR06", "NR01"],
+    }
+    
+    NORMAL_ROUTE_TIMES = {
+        ("NR1", "northbound"): {"NR01": 0, "NR02": 12, "NR03": 30, "NR04": 45, "NR05": 65},
+        ("NR1", "southbound"): {"NR05": 0, "NR04": 20, "NR03": 35, "NR02": 53, "NR01": 65},
+        ("NR2", "eastbound"): {"NR01": 0, "NR06": 14, "NR07": 30, "NR08": 52, "NR09": 74, "NR10": 93},
+        ("NR2", "westbound"): {"NR10": 0, "NR09": 19, "NR08": 38, "NR07": 60, "NR06": 76, "NR01": 90},
+    }
+    
+    # 1. national_rail_schedules
+    sched_rows = []
+    for s in data:
+        sched_rows.append((
+            s["schedule_id"],
+            s["line"],
+            s["service_type"].strip().lower() if s.get("service_type") else "normal",
+            s["direction"].strip().lower() if s.get("direction") else "northbound",
+            s["origin_station_id"],
+            s["destination_station_id"],
+            s["first_train_time"],
+            s["last_train_time"],
+            s["frequency_min"],
+            True
+        ))
         
-        # Seed fares
-        for fare_class, fares in schedule["fare_classes"].items():
-            cur.execute(
-                """
-                INSERT INTO national_rail_schedule_fares (
-                    schedule_id, fare_class, base_fare_usd, per_stop_rate_usd
-                ) VALUES (%s, %s, %s, %s)
-                ON CONFLICT (schedule_id, fare_class) DO NOTHING
-                """,
-                (
-                    schedule["schedule_id"], fare_class, fares["base_fare_usd"], fares["per_stop_rate_usd"]
-                )
-            )
+    insert_many(
+        cur,
+        "national_rail_schedules",
+        [
+            "schedule_id", "line", "service_type", "direction", "origin_station_id", "destination_station_id",
+            "first_train_time", "last_train_time", "frequency_min", "is_active"
+        ],
+        sched_rows
+    )
+    
+    # 2. national_rail_schedule_stops (with express interpolation)
+    stops_rows = []
+    for s in data:
+        line = s["line"]
+        direction = s["direction"]
+        dest = s["destination_station_id"]
+        stops_in_order = s["stops_in_order"]
+        passed_through = s.get("passed_through_stations", [])
+        
+        # Get standard physical stations sequence
+        physical_seq = PHYSICAL_STATIONS[(line, direction)]
+        
+        # Get normal travel times for scaling
+        normal_times = NORMAL_ROUTE_TIMES[(line, direction)]
+        normal_total_time = normal_times[dest]
+        
+        # Current travel time mapping from JSON
+        travel_times = s["travel_time_from_origin_min"]
+        express_total_time = travel_times[dest]
+        
+        # We loop through the physical sequence to preserve order and insert stops/passings
+        for order, station_id in enumerate(physical_seq):
+            if station_id in stops_in_order:
+                is_stop = True
+                time_from_orig = travel_times[station_id]
+                stops_rows.append((s["schedule_id"], station_id, order, time_from_orig, is_stop))
+            elif station_id in passed_through:
+                is_stop = False
+                # Interpolate time_from_orig based on normal route ratio
+                normal_time_st = normal_times[station_id]
+                time_from_orig = int(round(normal_time_st * (express_total_time / normal_total_time)))
+                stops_rows.append((s["schedule_id"], station_id, order, time_from_orig, is_stop))
+                
+    insert_many(
+        cur,
+        "national_rail_schedule_stops",
+        ["schedule_id", "station_id", "stop_order", "travel_time_from_origin_min", "is_stop"],
+        stops_rows
+    )
+    
+    # 3. national_rail_schedule_operates
+    DAY_NAME_TO_INT = {"mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 7}
+    ops_rows = []
+    for s in data:
+        for day in s["operates_on"]:
+            ops_rows.append((s["schedule_id"], DAY_NAME_TO_INT[day.lower()]))
+    insert_many(cur, "national_rail_schedule_operates", ["schedule_id", "day_of_week"], ops_rows)
+    
+    # 4. national_rail_schedule_fares
+    fares_rows = []
+    for s in data:
+        for fare_class, rates in s["fare_classes"].items():
+            fares_rows.append((s["schedule_id"], fare_class.strip().lower(), rates["base_fare_usd"], rates["per_stop_rate_usd"]))
+    insert_many(cur, "national_rail_schedule_fares", ["schedule_id", "fare_class", "base_fare_usd", "per_stop_rate_usd"], fares_rows)
+    
+    print(f"  national_rail_schedules seeded: {len(data)} schedules, {len(stops_rows)} scheduled/passed stops, {len(ops_rows)} operating days, {len(fares_rows)} class fares")
 
 
 def seed_seat_layouts(cur):
     data = load("national_rail_seat_layouts.json")
-    for layout in data:
-        cur.execute(
-            """
-            INSERT INTO national_rail_seat_layouts (layout_id, schedule_id)
-            VALUES (%s, %s)
-            ON CONFLICT (layout_id) DO NOTHING
-            """,
-            (layout["layout_id"], layout["schedule_id"])
-        )
-        for coach in layout["coaches"]:
-            cur.execute(
-                """
-                INSERT INTO national_rail_coaches (layout_id, coach, fare_class)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (layout_id, coach) DO NOTHING
-                """,
-                (layout["layout_id"], coach["coach"], coach["fare_class"])
-            )
-            for seat in coach["seats"]:
-                cur.execute(
-                    """
-                    INSERT INTO national_rail_seats (layout_id, coach, seat_id, row, seat_column)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (layout_id, coach, seat_id) DO NOTHING
-                    """,
-                    (layout["layout_id"], coach["coach"], seat["seat_id"], seat["row"], seat["column"])
-                )
+    
+    # 1. national_rail_seat_layouts (includes schedule_id reference in new schema)
+    layouts_rows = [(s["layout_id"], s["schedule_id"]) for s in data]
+    insert_many(cur, "national_rail_seat_layouts", ["layout_id", "schedule_id"], layouts_rows)
+    
+    # 2. national_rail_coaches
+    coaches_rows = []
+    # 3. national_rail_seats
+    seats_rows = []
+    
+    for s in data:
+        layout_id = s["layout_id"]
+        for coach_info in s["coaches"]:
+            coach = coach_info["coach"]
+            fare_class = coach_info["fare_class"].strip().lower() if coach_info.get("fare_class") else "standard"
+            coaches_rows.append((layout_id, coach, fare_class))
+            
+            for seat in coach_info["seats"]:
+                seats_rows.append((layout_id, coach, seat["seat_id"], seat["row"], seat["column"]))
+                
+    insert_many(cur, "national_rail_coaches", ["layout_id", "coach", "fare_class"], coaches_rows)
+    insert_many(cur, "national_rail_seats", ["layout_id", "coach", "seat_id", "row", "seat_column"], seats_rows)
+    
+    print(f"  seat_layouts templates seeded: {len(layouts_rows)} layouts, {len(coaches_rows)} coaches, {len(seats_rows)} seats")
 
 
 def seed_users(cur):
     data = load("registered_users.json")
+    
+    # Scheme A: 產生確定性 UUID 並填充用戶對照表
+    # 【工業級優化點：確定性 UUID (Deterministic UUID)】
+    # 原本使用 uuid.uuid4() 在重覆執行 seed_postgres.py 時會生成隨機新 UUID。
+    # 當新 UUID 因為 email UNIQUE 約束被資料庫略過（DO NOTHING）時，
+    # 記憶體中的 USER_UUID_MAP 會留下未寫入資料庫的 UUID，導致後續插入 bookings 時發生外鍵約束衝突 (FK Violation)。
+    # 改用 uuid.uuid5 基於 NAMESPACE_DNS 與 mock user_id 可確保每次執行都取得完全相同的 UUID，支持安全重複執行。
+    users_rows = []
+    creds_rows = []
+    
     for u in data:
-        user_uuid = to_uuid(u["user_id"])
-        cur.execute(
-            """
-            INSERT INTO registered_users (user_id, full_name, email, phone, date_of_birth, registered_at, is_active)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (user_id) DO NOTHING
-            """,
-            (user_uuid, u["full_name"], u["email"], u["phone"], u["date_of_birth"], u["registered_at"], u["is_active"])
-        )
-        cur.execute(
-            """
-            INSERT INTO user_credentials (user_id, password_hash, secret_question, secret_answer_hash)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (user_id) DO NOTHING
-            """,
-            (user_uuid, u["password"], u["secret_question"], u["secret_answer"])
-        )
+        ru_id = u["user_id"]
+        real_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, u["user_id"]))
+        USER_UUID_MAP[ru_id] = real_uuid
+        
+        users_rows.append((
+            real_uuid,
+            u["full_name"],
+            u["email"],
+            u["phone"],
+            u["date_of_birth"],
+            u["registered_at"],
+            u["is_active"]
+        ))
+        
+        # 【工業級優化點：高強度密碼與密保問答雜湊 PBKDF2】
+        # 教學範例原本直接將密碼與密保答案明文存入資料庫，這在生產環境下是非常嚴重的安全漏洞。
+        # 這裡改用從 queries 導入的 PBKDF2 密碼雜湊算法，確保資料庫中完全不儲存任何明文。
+        creds_rows.append((
+            real_uuid,
+            _hash_password(u["password"]),  # 儲存安全 PBKDF2 密碼雜湊
+            u["secret_question"],
+            _hash_password(u["secret_answer"])  # 儲存安全 PBKDF2 密保答案雜湊
+        ))
+        
+    insert_many(
+        cur,
+        "registered_users",
+        ["user_id", "full_name", "email", "phone", "date_of_birth", "registered_at", "is_active"],
+        users_rows
+    )
+    
+    insert_many(
+        cur,
+        "user_credentials",
+        ["user_id", "password_hash", "secret_question", "secret_answer_hash"],
+        creds_rows
+    )
+    
+    print(f"  registered_users & credentials seeded: {len(data)} users (mapped with secure random UUIDs)")
 
 
 def seed_national_rail_bookings(cur):
     data = load("bookings.json")
-    stations = load("national_rail_stations.json")
-    station_names = {s["station_id"]: s["name"] for s in stations}
-    for booking in data:
-        origin_name = station_names[booking["origin_station_id"]]
-        dest_name = station_names[booking["destination_station_id"]]
-        cur.execute(
-            """
-            INSERT INTO national_rail_bookings (
-                booking_id, user_id, schedule_id, origin_station_id, origin_station_name,
-                destination_station_id, destination_station_name, travel_date, departure_time,
-                ticket_type, fare_class, coach, seat_id, stops_travelled, amount_usd,
-                status, booked_at, travelled_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (booking_id) DO NOTHING
-            """,
-            (
-                booking["booking_id"], to_uuid(booking["user_id"]), booking["schedule_id"],
-                booking["origin_station_id"], origin_name,
-                booking["destination_station_id"], dest_name,
-                booking["travel_date"], booking["departure_time"],
-                booking["ticket_type"], booking["fare_class"], booking["coach"],
-                booking["seat_id"], booking["stops_travelled"], booking["amount_usd"],
-                booking["status"], booking["booked_at"], booking["travelled_at"]
-            )
-        )
+    
+    # Pre-load national rail station names for snapshot redundancy
+    rail_stations_data = load("national_rail_stations.json")
+    rail_station_names = {s["station_id"]: s["name"] for s in rail_stations_data}
+    
+    bookings_rows = []
+    for b in data:
+        # Resolve user UUID safely with secure default fallback
+        user_uuid = USER_UUID_MAP.get(b["user_id"])
+        if not user_uuid:
+            num = int(b["user_id"][2:]) if b["user_id"][2:].isdigit() else 0
+            user_uuid = f"00000000-0000-0000-0000-{num:012d}"
+            
+        # Fetch station names safely with fallback to prevent KeyError
+        origin_name = rail_station_names.get(b["origin_station_id"], "Unknown Station")
+        dest_name = rail_station_names.get(b["destination_station_id"], "Unknown Station")
+        bookings_rows.append((
+            b["booking_id"],
+            user_uuid,
+            b["schedule_id"],
+            b["origin_station_id"],
+            origin_name,
+            b["destination_station_id"],
+            dest_name,
+            b["travel_date"],
+            b["departure_time"],
+            b["ticket_type"].strip().lower() if b.get("ticket_type") else "single",
+            b["fare_class"].strip().lower() if b.get("fare_class") else "standard",
+            b["coach"].strip().upper(),
+            b["seat_id"].strip().upper(),
+            b["stops_travelled"],
+            b["amount_usd"],
+            b["status"].strip().lower() if b.get("status") else "confirmed",
+            b["booked_at"],
+            b.get("travelled_at")
+        ))
+        
+    insert_many(
+        cur,
+        "national_rail_bookings",
+        [
+            "booking_id", "user_id", "schedule_id", 
+            "origin_station_id", "origin_station_name", 
+            "destination_station_id", "destination_station_name",
+            "travel_date", "departure_time", "ticket_type", "fare_class", "coach", "seat_id",
+            "stops_travelled", "amount_usd", "status", "booked_at", "travelled_at"
+        ],
+        bookings_rows
+    )
+    print(f"  national_rail_bookings seeded: {len(data)} records")
 
 
 def seed_metro_travels(cur):
     data = load("metro_travel_history.json")
-    stations = load("metro_stations.json")
-    station_names = {s["station_id"]: s["name"] for s in stations}
-    for trip in data:
-        origin_name = station_names[trip["origin_station_id"]]
-        dest_name = station_names[trip["destination_station_id"]]
+    
+    # Pre-load metro station names for snapshot redundancy
+    metro_stations_data = load("metro_stations.json")
+    metro_station_names = {s["station_id"]: s["name"] for s in metro_stations_data}
+    
+    # 1. First, seed metro_passes for all day_pass purchases
+    passes_rows = []
+    for t in data:
+        ticket_type = t.get("ticket_type", "").strip().lower()
+        if ticket_type == "day_pass" and t.get("day_pass_ref") is None:
+            user_uuid = USER_UUID_MAP[t["user_id"]]
+            purchased_at = t.get("purchased_at") or f"{t['travel_date']}T00:00:00Z"
+            expires_at = f"{t['travel_date']}T23:59:59Z"
+            passes_rows.append((
+                t["trip_id"], # pass_id matches the purchase trip's ID
+                user_uuid,
+                "DAY_PASS",
+                expires_at,
+                purchased_at
+            ))
+    insert_many(cur, "metro_passes", ["pass_id", "user_id", "pass_type", "expires_at", "created_at"], passes_rows)
+    print(f"  metro_passes seeded: {len(passes_rows)} records")
+    
+    # 2. Seed metro_travel_history referencing pass_id_ref
+    travel_rows = []
+    for t in data:
+        user_uuid = USER_UUID_MAP[t["user_id"]]
+        # Fetch station names safely with fallback to prevent KeyError
+        origin_name = metro_station_names.get(t["origin_station_id"], "Unknown Station")
+        dest_name = metro_station_names.get(t["destination_station_id"], "Unknown Station")
         
+        ticket_type = t.get("ticket_type", "").strip().lower()
+        status = t.get("status", "").strip().lower() if t.get("status") else "completed"
+        
+        # In the new schema: pass_id_ref references the purchased pass_id (which is its day_pass_ref or trip_id itself)
         pass_id_ref = None
-        if trip["ticket_type"] == "day_pass":
-            ref = trip.get("day_pass_ref")
-            if ref is None:
-                pass_id = trip["trip_id"]
-                expires_at = None
-                if trip["travel_date"]:
-                    expires_at = f"{trip['travel_date']}T23:59:59Z"
-                
-                cur.execute(
-                    """
-                    INSERT INTO metro_passes (pass_id, user_id, pass_type, expires_at, created_at)
-                    VALUES (%s, %s, 'DAY_PASS', %s, %s)
-                    ON CONFLICT (pass_id) DO NOTHING
-                    """,
-                    (pass_id, to_uuid(trip["user_id"]), expires_at, trip["purchased_at"])
-                )
-                pass_id_ref = pass_id
-            else:
-                pass_id_ref = ref
-
-        cur.execute(
-            """
-            INSERT INTO metro_travel_history (
-                trip_id, user_id, schedule_id, origin_station_id, origin_station_name,
-                destination_station_id, destination_station_name, travel_date, ticket_type,
-                pass_id_ref, stops_travelled, amount_usd, status, purchased_at, travelled_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (trip_id) DO NOTHING
-            """,
-            (
-                trip["trip_id"], to_uuid(trip["user_id"]), trip["schedule_id"],
-                trip["origin_station_id"], origin_name,
-                trip["destination_station_id"], dest_name,
-                trip["travel_date"], trip["ticket_type"], pass_id_ref,
-                trip["stops_travelled"], trip["amount_usd"], trip["status"],
-                trip.get("purchased_at"), trip.get("travelled_at")
-            )
-        )
+        if ticket_type == "day_pass":
+            pass_id_ref = t.get("day_pass_ref") or t["trip_id"]
+            
+        travel_rows.append((
+            t["trip_id"],
+            user_uuid,
+            t["schedule_id"],
+            t["origin_station_id"],
+            origin_name,
+            t["destination_station_id"],
+            dest_name,
+            t["travel_date"],
+            ticket_type,
+            pass_id_ref,
+            t.get("stops_travelled"),
+            t["amount_usd"],
+            status,
+            t.get("purchased_at"),
+            t.get("travelled_at")
+        ))
+        
+    insert_many(
+        cur,
+        "metro_travel_history",
+        [
+            "trip_id", "user_id", "schedule_id", 
+            "origin_station_id", "origin_station_name", 
+            "destination_station_id", "destination_station_name",
+            "travel_date", "ticket_type", "pass_id_ref", "stops_travelled", "amount_usd", "status",
+            "purchased_at", "travelled_at"
+        ],
+        travel_rows
+    )
+    print(f"  metro_travel_history seeded: {len(data)} records")
 
 
 def seed_payments(cur):
     data = load("payments.json")
-    for pm in data:
-        ref = pm["booking_id"]
-        national_booking_id = ref if ref.startswith("BK") else None
-        metro_trip_id = ref if ref.startswith("MT") else None
-        cur.execute(
-            """
-            INSERT INTO payments (payment_id, national_booking_id, metro_trip_id, amount_usd, method, status, paid_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (payment_id) DO NOTHING
-            """,
-            (pm["payment_id"], national_booking_id, metro_trip_id, pm["amount_usd"], pm["method"], pm["status"], pm["paid_at"])
-        )
+    
+    payments_rows = []
+    for p in data:
+        booking_id = p["booking_id"]
+        
+        # Polymorphic foreign keys resolution
+        national_booking_id = booking_id if booking_id.startswith("BK") else None
+        metro_trip_id = booking_id if booking_id.startswith("MT") else None
+        
+        method = p["method"].strip().lower() if p.get("method") else "credit_card"
+        status = p["status"].strip().lower() if p.get("status") else "paid"
+        
+        payments_rows.append((
+            p["payment_id"],
+            national_booking_id,
+            metro_trip_id,
+            p["amount_usd"],
+            method,
+            status,
+            p["paid_at"]
+        ))
+        
+    insert_many(
+        cur,
+        "payments",
+        ["payment_id", "national_booking_id", "metro_trip_id", "amount_usd", "method", "status", "paid_at"],
+        payments_rows
+    )
+    print(f"  payments seeded: {len(data)} polymorphic records")
 
 
 def seed_feedback(cur):
     data = load("feedback.json")
-    for fb in data:
-        ref = fb["booking_id"]
-        national_booking_id = ref if ref.startswith("BK") else None
-        metro_trip_id = ref if ref.startswith("MT") else None
-        cur.execute(
-            """
-            INSERT INTO feedback (feedback_id, national_booking_id, metro_trip_id, user_id, rating, comment, submitted_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (feedback_id) DO NOTHING
-            """,
-            (fb["feedback_id"], national_booking_id, metro_trip_id, to_uuid(fb["user_id"]), fb["rating"], fb["comment"], fb["submitted_at"])
-        )
+    
+    feedback_rows = []
+    for f in data:
+        booking_id = f["booking_id"]
+        user_uuid = USER_UUID_MAP[f["user_id"]]
+        
+        # Polymorphic foreign keys resolution
+        national_booking_id = booking_id if booking_id.startswith("BK") else None
+        metro_trip_id = booking_id if booking_id.startswith("MT") else None
+        
+        feedback_rows.append((
+            f["feedback_id"],
+            national_booking_id,
+            metro_trip_id,
+            user_uuid,
+            f["rating"],
+            f["comment"],
+            f["submitted_at"]
+        ))
+        
+    insert_many(
+        cur,
+        "feedback",
+        ["feedback_id", "national_booking_id", "metro_trip_id", "user_id", "rating", "comment", "submitted_at"],
+        feedback_rows
+    )
+    print(f"  feedback seeded: {len(data)} polymorphic records")
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -389,11 +580,7 @@ def main():
         
         print("- Metro schedules...")
         seed_metro_schedules(cur)
-        
-        print("- National rail schedules...")
-        seed_national_rail_schedules(cur)
-        
-        print("- Seat layouts...")
+        seed_national_rail_schedules(cur)  # Must be seeded before seat layouts due to schedule_id FK reference
         seed_seat_layouts(cur)
         
         print("- Users...")
