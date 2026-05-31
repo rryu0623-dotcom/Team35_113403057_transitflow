@@ -140,50 +140,40 @@ def seed_national_rail_stations(cur):
 def seed_metro_schedules(cur):
     data = load("metro_schedules.json")
     
-    # 1. metro_schedules
-    sched_rows = [
-        (
+    # Build JSONB-compatible travel_time arrays (ordered by stops_in_order)
+    sched_rows = []
+    for s in data:
+        # Convert travel_time_from_origin_min dict → ordered JSONB array matching stops_in_order
+        time_array = [s["travel_time_from_origin_min"][sid] for sid in s["stops_in_order"]]
+        sched_rows.append((
             s["schedule_id"],
             s["line"],
             s["direction"].strip().lower() if s.get("direction") else "northbound",
             s["origin_station_id"],
             s["destination_station_id"],
+            json.dumps(s["stops_in_order"]),
+            json.dumps(time_array),
             s["first_train_time"],
             s["last_train_time"],
             s["base_fare_usd"],
             s["per_stop_rate_usd"],
             s["frequency_min"],
+            json.dumps(s["operates_on"]),
             True
-        )
-        for s in data
-    ]
+        ))
     insert_many(
         cur,
         "metro_schedules",
         [
             "schedule_id", "line", "direction", "origin_station_id", "destination_station_id",
-            "first_train_time", "last_train_time", "base_fare_usd", "per_stop_rate_usd", "frequency_min", "is_active"
+            "stops_in_order", "travel_time_from_origin_min",
+            "first_train_time", "last_train_time", "base_fare_usd", "per_stop_rate_usd", "frequency_min",
+            "operates_on", "is_active"
         ],
         sched_rows
     )
     
-    # 2. metro_schedule_stops
-    stops_rows = []
-    for s in data:
-        for order, station_id in enumerate(s["stops_in_order"]):
-            time_from_orig = s["travel_time_from_origin_min"][station_id]
-            stops_rows.append((s["schedule_id"], station_id, order, time_from_orig))
-    insert_many(cur, "metro_schedule_stops", ["schedule_id", "station_id", "stop_order", "travel_time_from_origin_min"], stops_rows)
-    
-    # 3. metro_schedule_operates
-    DAY_NAME_TO_INT = {"mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 7}
-    ops_rows = []
-    for s in data:
-        for day in s["operates_on"]:
-            ops_rows.append((s["schedule_id"], DAY_NAME_TO_INT[day.lower()]))
-    insert_many(cur, "metro_schedule_operates", ["schedule_id", "day_of_week"], ops_rows)
-    
-    print(f"  metro_schedules seeded: {len(data)} schedules, {len(stops_rows)} scheduled stops, {len(ops_rows)} operating days mapping")
+    print(f"  metro_schedules seeded: {len(data)} schedules (JSONB stops/operates embedded)")
 
 
 def seed_national_rail_schedules(cur):
@@ -203,9 +193,11 @@ def seed_national_rail_schedules(cur):
         ("NR2", "westbound"): {"NR10": 0, "NR09": 19, "NR08": 38, "NR07": 60, "NR06": 76, "NR01": 90},
     }
     
-    # 1. national_rail_schedules
+    # 1. national_rail_schedules (with JSONB columns)
     sched_rows = []
     for s in data:
+        # Convert travel_time_from_origin_min dict → ordered JSONB array matching stops_in_order
+        time_array = [s["travel_time_from_origin_min"][sid] for sid in s["stops_in_order"]]
         sched_rows.append((
             s["schedule_id"],
             s["line"],
@@ -213,9 +205,13 @@ def seed_national_rail_schedules(cur):
             s["direction"].strip().lower() if s.get("direction") else "northbound",
             s["origin_station_id"],
             s["destination_station_id"],
+            json.dumps(s["stops_in_order"]),
+            json.dumps(s.get("passed_through_stations", [])),
+            json.dumps(time_array),
             s["first_train_time"],
             s["last_train_time"],
             s["frequency_min"],
+            json.dumps(s["operates_on"]),
             True
         ))
         
@@ -224,67 +220,21 @@ def seed_national_rail_schedules(cur):
         "national_rail_schedules",
         [
             "schedule_id", "line", "service_type", "direction", "origin_station_id", "destination_station_id",
-            "first_train_time", "last_train_time", "frequency_min", "is_active"
+            "stops_in_order", "passed_through_stations", "travel_time_from_origin_min",
+            "first_train_time", "last_train_time", "frequency_min",
+            "operates_on", "is_active"
         ],
         sched_rows
     )
     
-    # 2. national_rail_schedule_stops (with express interpolation)
-    stops_rows = []
-    for s in data:
-        line = s["line"]
-        direction = s["direction"]
-        dest = s["destination_station_id"]
-        stops_in_order = s["stops_in_order"]
-        passed_through = s.get("passed_through_stations", [])
-        
-        # Get standard physical stations sequence
-        physical_seq = PHYSICAL_STATIONS[(line, direction)]
-        
-        # Get normal travel times for scaling
-        normal_times = NORMAL_ROUTE_TIMES[(line, direction)]
-        normal_total_time = normal_times[dest]
-        
-        # Current travel time mapping from JSON
-        travel_times = s["travel_time_from_origin_min"]
-        express_total_time = travel_times[dest]
-        
-        # We loop through the physical sequence to preserve order and insert stops/passings
-        for order, station_id in enumerate(physical_seq):
-            if station_id in stops_in_order:
-                is_stop = True
-                time_from_orig = travel_times[station_id]
-                stops_rows.append((s["schedule_id"], station_id, order, time_from_orig, is_stop))
-            elif station_id in passed_through:
-                is_stop = False
-                # Interpolate time_from_orig based on normal route ratio
-                normal_time_st = normal_times[station_id]
-                time_from_orig = int(round(normal_time_st * (express_total_time / normal_total_time)))
-                stops_rows.append((s["schedule_id"], station_id, order, time_from_orig, is_stop))
-                
-    insert_many(
-        cur,
-        "national_rail_schedule_stops",
-        ["schedule_id", "station_id", "stop_order", "travel_time_from_origin_min", "is_stop"],
-        stops_rows
-    )
-    
-    # 3. national_rail_schedule_operates
-    DAY_NAME_TO_INT = {"mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 7}
-    ops_rows = []
-    for s in data:
-        for day in s["operates_on"]:
-            ops_rows.append((s["schedule_id"], DAY_NAME_TO_INT[day.lower()]))
-    insert_many(cur, "national_rail_schedule_operates", ["schedule_id", "day_of_week"], ops_rows)
-    
-    # 4. national_rail_schedule_fares
+    # 2. national_rail_schedule_fares
     fares_rows = []
     for s in data:
         for fare_class, rates in s["fare_classes"].items():
             fares_rows.append((s["schedule_id"], fare_class.strip().lower(), rates["base_fare_usd"], rates["per_stop_rate_usd"]))
     insert_many(cur, "national_rail_schedule_fares", ["schedule_id", "fare_class", "base_fare_usd", "per_stop_rate_usd"], fares_rows)
     
-    print(f"  national_rail_schedules seeded: {len(data)} schedules, {len(stops_rows)} scheduled/passed stops, {len(ops_rows)} operating days, {len(fares_rows)} class fares")
+    print(f"  national_rail_schedules seeded: {len(data)} schedules, {len(fares_rows)} class fares (JSONB stops/operates embedded)")
 
 
 def seed_seat_layouts(cur):
