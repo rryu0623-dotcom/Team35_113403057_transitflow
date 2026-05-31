@@ -135,7 +135,7 @@ def seed_metro_schedules(cur):
         (
             s["schedule_id"],
             s["line"],
-            s["direction"],
+            s["direction"].strip().lower() if s.get("direction") else "northbound",
             s["origin_station_id"],
             s["destination_station_id"],
             s["first_train_time"],
@@ -199,8 +199,8 @@ def seed_national_rail_schedules(cur):
         sched_rows.append((
             s["schedule_id"],
             s["line"],
-            s["service_type"],
-            s["direction"],
+            s["service_type"].strip().lower() if s.get("service_type") else "normal",
+            s["direction"].strip().lower() if s.get("direction") else "northbound",
             s["origin_station_id"],
             s["destination_station_id"],
             s["first_train_time"],
@@ -271,7 +271,7 @@ def seed_national_rail_schedules(cur):
     fares_rows = []
     for s in data:
         for fare_class, rates in s["fare_classes"].items():
-            fares_rows.append((s["schedule_id"], fare_class, rates["base_fare_usd"], rates["per_stop_rate_usd"]))
+            fares_rows.append((s["schedule_id"], fare_class.strip().lower(), rates["base_fare_usd"], rates["per_stop_rate_usd"]))
     insert_many(cur, "national_rail_schedule_fares", ["schedule_id", "fare_class", "base_fare_usd", "per_stop_rate_usd"], fares_rows)
     
     print(f"  national_rail_schedules seeded: {len(data)} schedules, {len(stops_rows)} scheduled/passed stops, {len(ops_rows)} operating days, {len(fares_rows)} class fares")
@@ -293,7 +293,7 @@ def seed_seat_layouts(cur):
         layout_id = s["layout_id"]
         for coach_info in s["coaches"]:
             coach = coach_info["coach"]
-            fare_class = coach_info["fare_class"]
+            fare_class = coach_info["fare_class"].strip().lower() if coach_info.get("fare_class") else "standard"
             coaches_rows.append((layout_id, coach, fare_class))
             
             for seat in coach_info["seats"]:
@@ -498,13 +498,16 @@ def seed_payments(cur):
         national_booking_id = booking_id if booking_id.startswith("BK") else None
         metro_trip_id = booking_id if booking_id.startswith("MT") else None
         
+        method = p["method"].strip().lower() if p.get("method") else "credit_card"
+        status = p["status"].strip().lower() if p.get("status") else "paid"
+        
         payments_rows.append((
             p["payment_id"],
             national_booking_id,
             metro_trip_id,
             p["amount_usd"],
-            p["method"],
-            p["status"],
+            method,
+            status,
             p["paid_at"]
         ))
         
