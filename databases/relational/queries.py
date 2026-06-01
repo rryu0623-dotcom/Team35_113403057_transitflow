@@ -36,22 +36,22 @@ from skeleton.config import PG_DSN, VECTOR_TOP_K, VECTOR_SIMILARITY_THRESHOLD
 
 
 # ==============================================================================
-#  工業級優化點：資料庫連線池 (Database Connection Pooling)
+#  Industrial-grade Optimization: Database Connection Pooling
 # ==============================================================================
-# 原本的 _connect() 在每次查詢時都會向資料庫重新開啟一個實體 TCP 連線，
-# 這在高併發/高流量的生產環境中會造成巨大的延遲與連線數耗盡 (Connection Exhaustion) 的崩潰。
-# 這裡引入 ThreadedConnectionPool (最小 1 個連線，最大 20 個連線)。
+# The original _connect() opened a physical TCP connection to the database on every query,
+# which would cause massive latency and crashes due to Connection Exhaustion in high-concurrency/high-traffic production environments.
+# Here we introduce a ThreadedConnectionPool (min 1, max 20 connections).
 # 
-# 為了完美向後相容原本的 context manager (with _connect() as conn) 與手動 conn.close() 的寫法，
-# 我們設計了 ConnectionProxy 代理類別：
-# 1. 攔截 close()：呼叫 close() 時，不會真正關閉連線，而是安全地將連線歸還到 pool 中。
-# 2. 自動回收：當 context manager (__exit__) 結束時，自動執行 commit/rollback 並安全回收連線。
-# 3. 透明轉發：所有其他屬性與方法調用皆透明地委託給真實的 psycopg2 connection 物件。
+# To perfectly maintain backward compatibility with the original context manager (with _connect() as conn) and manual conn.close() syntax,
+# we designed a ConnectionProxy proxy class:
+# 1. Intercept close(): When close() is called, the connection is not actually closed, but safely returned to the pool.
+# 2. Automatic recycling: When the context manager (__exit__) finishes, it automatically commits/rolls back and safely recycles the connection.
+# 3. Transparent forwarding: All other attribute and method calls are transparently delegated to the real psycopg2 connection object.
 # ==============================================================================
 from contextlib import contextmanager
 from psycopg2.pool import ThreadedConnectionPool
 
-# 全域 thread-safe 連線池 (min 1, max 20 connections)
+# Global thread-safe connection pool (min 1, max 20 connections)
 _pool = ThreadedConnectionPool(1, 20, PG_DSN)
 
 class ConnectionProxy:
@@ -60,7 +60,7 @@ class ConnectionProxy:
         self._pool = pool
         
     def __getattr__(self, name):
-        # 透明轉發所有屬性與方法給真實的 psycopg2 連線物件
+        # Transparently forward all attributes and methods to the real psycopg2 connection object
         return getattr(self._conn, name)
         
     def __enter__(self):
@@ -71,19 +71,19 @@ class ConnectionProxy:
         try:
             self._conn.__exit__(exc_type, exc_val, exc_tb)
         finally:
-            # 區塊退出時自動回收連線
+            # Automatically recycle connection when exiting the block
             self.close()
         
     def close(self):
         try:
-            # 將實體連線歸還給 ThreadedConnectionPool，而不是真的銷毀它
+            # Return physical connection to ThreadedConnectionPool instead of actually destroying it
             self._pool.putconn(self._conn)
         except Exception:
             pass
 
 
 def _connect():
-    """從全域 ThreadedConnectionPool 借用一個連線，並包裝於 ConnectionProxy 中傳回。"""
+    """Borrow a connection from the global ThreadedConnectionPool and return it wrapped in ConnectionProxy."""
     conn = _pool.getconn()
     conn.autocommit = True
     return ConnectionProxy(conn, _pool)

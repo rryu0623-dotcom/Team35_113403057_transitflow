@@ -35,7 +35,7 @@ def seed():
         session.run("MATCH (n) DETACH DELETE n")
         print("  Cleared existing graph data")
 
-        # 1. 建立 MetroStation 節點
+        # 1. Create MetroStation nodes
         print("  Creating MetroStation nodes...")
         session.run("""
             UNWIND $stations AS s
@@ -46,7 +46,7 @@ def seed():
             })
         """, stations=metro_stations)
 
-        # 2. 建立 NationalRailStation 節點
+        # 2. Create NationalRailStation nodes
         print("  Creating NationalRailStation nodes...")
         session.run("""
             UNWIND $stations AS s
@@ -57,7 +57,7 @@ def seed():
             })
         """, stations=rail_stations)
 
-        # 3. 建立 METRO_LINK 關係 (捷運路線)
+        # 3. Create METRO_LINK relationships (Metro Line)
         print("  Creating METRO_LINK relationships...")
         session.run("""
             UNWIND $stations AS s
@@ -68,7 +68,7 @@ def seed():
             SET r.travel_time_min = adj.travel_time_min
         """, stations=metro_stations)
 
-        # 4. 建立 RAIL_LINK 關係 (國鐵路線)
+        # 4. Create RAIL_LINK relationships (National Rail Line)
         print("  Creating RAIL_LINK relationships...")
         session.run("""
             UNWIND $stations AS s
@@ -79,7 +79,7 @@ def seed():
             SET r.travel_time_min = adj.travel_time_min
         """, stations=rail_stations)
 
-        # 5. 建立 INTERCHANGE_TO 轉乘關係 (雙向)
+        # 5. Create INTERCHANGE_TO transfer relationships (Bidirectional)
         print("  Creating INTERCHANGE_TO relationships...")
         session.run("""
             UNWIND $stations AS s
