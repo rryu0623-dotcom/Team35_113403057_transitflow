@@ -268,12 +268,13 @@ def seed_seat_layouts(cur):
 def seed_users(cur):
     data = load("registered_users.json")
     
-    # Scheme A: 產生確定性 UUID 並填充用戶對照表
-    # 【工業級優化點：確定性 UUID (Deterministic UUID)】
-    # 原本使用 uuid.uuid4() 在重覆執行 seed_postgres.py 時會生成隨機新 UUID。
-    # 當新 UUID 因為 email UNIQUE 約束被資料庫略過（DO NOTHING）時，
-    # 記憶體中的 USER_UUID_MAP 會留下未寫入資料庫的 UUID，導致後續插入 bookings 時發生外鍵約束衝突 (FK Violation)。
-    # 改用 uuid.uuid5 基於 NAMESPACE_DNS 與 mock user_id 可確保每次執行都取得完全相同的 UUID，支持安全重複執行。
+    # Scheme A: Generate deterministic UUIDs and populate the user mapping table
+    # [Industrial-grade Optimization: Deterministic UUID]
+    # Originally, using uuid.uuid4() would generate random new UUIDs every time seed_postgres.py was executed.
+    # When a new UUID was skipped by the database due to the UNIQUE email constraint (DO NOTHING),
+    # the in-memory USER_UUID_MAP would retain a UUID that wasn't actually written to the database,
+    # causing a foreign key violation (FK Violation) when subsequently inserting bookings.
+    # Switching to uuid.uuid5 based on NAMESPACE_DNS and the mock user_id ensures that the exact same UUID is obtained in every execution, supporting safe re-run ability.
     users_rows = []
     creds_rows = []
     
@@ -292,14 +293,14 @@ def seed_users(cur):
             u["is_active"]
         ))
         
-        # 【工業級優化點：高強度密碼與密保問答雜湊 PBKDF2】
-        # 教學範例原本直接將密碼與密保答案明文存入資料庫，這在生產環境下是非常嚴重的安全漏洞。
-        # 這裡改用從 queries 導入的 PBKDF2 密碼雜湊算法，確保資料庫中完全不儲存任何明文。
+        # [Industrial-grade Optimization: High-strength Password and Security Answer Hashing using PBKDF2]
+        # The teaching example originally stored passwords and security answers in plain text directly in the database, which is a very severe security vulnerability in production environments.
+        # Here we switch to the PBKDF2 password hashing algorithm imported from queries, ensuring that no plain text is ever stored in the database.
         creds_rows.append((
             real_uuid,
-            _hash_password(u["password"]),  # 儲存安全 PBKDF2 密碼雜湊
+            _hash_password(u["password"]),  # Store secure PBKDF2 password hash
             u["secret_question"],
-            _hash_password(u["secret_answer"])  # 儲存安全 PBKDF2 密保答案雜湊
+            _hash_password(u["secret_answer"])  # Store secure PBKDF2 secret answer hash
         ))
         
     insert_many(
