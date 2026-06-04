@@ -511,6 +511,7 @@ def execute_booking(
                       AND deleted_at IS NULL
                   )
                   LIMIT 1
+                  FOR UPDATE OF s SKIP LOCKED
                 """, (schedule_id, fare_class, schedule_id, travel_date))
                 seat_info = cur.fetchone()
                 if not seat_info:
@@ -518,11 +519,12 @@ def execute_booking(
                 actual_seat_id = seat_info['seat_id']
                 coach = seat_info['coach']
             else:
-                cur.execute(seat_query_base + " AND s.seat_id = %s", (schedule_id, fare_class, actual_seat_id))
+                cur.execute(seat_query_base + " AND s.seat_id = %s FOR UPDATE OF s", (schedule_id, fare_class, actual_seat_id))
                 seat_row = cur.fetchone()
                 if not seat_row:
                     raise ValueError("Invalid seat ID for this class/schedule.")
                 coach = seat_row['coach']
+
                 
                 # Double-booking check: verify this specific seat is not already booked
                 cur.execute("""
@@ -792,10 +794,20 @@ def update_password(email: str, new_password: str) -> bool:
             WHERE email = %s AND deleted_at IS NULL
         )
     """
-    with _connect() as conn:
+    conn = _connect(autocommit=False)
+    conn.autocommit = False # Start transaction
+    try:
         with conn.cursor() as cur:
             cur.execute(sql, (pwd_hash, pwd_salt, email))
-            return cur.rowcount > 0
+            rowcount = cur.rowcount
+        conn.commit()
+        return rowcount > 0
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
 
 
 
