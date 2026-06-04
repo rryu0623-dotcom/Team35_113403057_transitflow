@@ -55,6 +55,9 @@ TransitFlow is a Python-based AI chat assistant for a fictional transit operator
 --  TransitFlow PostgreSQL Schema
 --  Seed data is loaded separately by: python skeleton/seed_postgres.py
 --
+--  DELETE STRATEGY: This database uses a Soft Delete strategy (via deleted_at TIMESTAMPTZ columns)
+--  for audit trails, historical reference, and to prevent breaking cascade joins on transactional data.
+--
 --  TWO ROLES:
 --    1. Relational  → dual-network transit data you design below
 --    2. Vector      → policy documents for RAG (provided — do not modify)
@@ -80,6 +83,7 @@ TransitFlow is a Python-based AI chat assistant for a fictional transit operator
 --  Apply your schema with:
 --    docker-compose down -v && docker-compose up -d
 -- ============================================================
+
 -- Option 2: PostgreSQL native ENUM (fast, enforced at type level)
 CREATE TYPE booking_status AS ENUM ('confirmed', 'completed', 'cancelled');
 CREATE TYPE travel_status AS ENUM ('completed', 'cancelled');
@@ -93,9 +97,11 @@ CREATE TYPE pass_type AS ENUM ('SINGLE', 'DAY_PASS', 'MONTHLY');
 CREATE TYPE payment_method AS ENUM ('credit_card', 'debit_card', 'ewallet');
 
 
+
+
 -- 1. Metro stations table
 CREATE TABLE metro_stations (
-    station_id                   VARCHAR(10)  PRIMARY KEY,
+    station_id                   VARCHAR(10)  PRIMARY KEY, -- PK Design Decision: A natural business key (e.g. MS01) is chosen because station identifiers are stable, globally unique, and defined by the transit authority.
     name                         VARCHAR(100) NOT NULL,
     is_interchange_metro         BOOLEAN      NOT NULL,
     is_interchange_national_rail BOOLEAN      NOT NULL,
@@ -121,7 +127,7 @@ CREATE TABLE metro_station_adjacents (
 
 -- 4. National rail stations table
 CREATE TABLE national_rail_stations (
-    station_id                   VARCHAR(10)  PRIMARY KEY,
+    station_id                   VARCHAR(10)  PRIMARY KEY, -- PK Design Decision: A natural business key (e.g. NR01) is chosen because rail station identifiers are stable, globally unique, and defined by the transit authority.
     name                         VARCHAR(100) NOT NULL,
     is_interchange_national_rail BOOLEAN      NOT NULL,
     is_interchange_metro         BOOLEAN      NOT NULL,
@@ -155,13 +161,11 @@ CREATE TABLE station_interchanges (
 
 -- 7. Metro schedule table
 CREATE TABLE metro_schedules (
-    schedule_id                 VARCHAR(20)  PRIMARY KEY,
+    schedule_id                 VARCHAR(20)  PRIMARY KEY, -- PK Design Decision: Business identifier (e.g., MS_SCH01) is chosen as primary key for readability and stable referencing.
     line                        VARCHAR(10)  NOT NULL,
     direction                   transit_direction  NOT NULL,
-    origin_station_id           VARCHAR(10)  REFERENCES metro_stations(station_id),
-    destination_station_id      VARCHAR(10)  REFERENCES metro_stations(station_id),
-    stops_in_order              JSONB        NOT NULL,
-    travel_time_from_origin_min JSONB        NOT NULL,
+    origin_station_id           VARCHAR(10)  REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id      VARCHAR(10)  REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
     first_train_time            TIME         NOT NULL,
     last_train_time             TIME         NOT NULL,
     base_fare_usd               NUMERIC(5,2) NOT NULL,
@@ -172,23 +176,42 @@ CREATE TABLE metro_schedules (
     is_active                   BOOLEAN      NOT NULL DEFAULT TRUE
 );
 
--- 10. National rail schedule table
 CREATE TABLE national_rail_schedules (
-    schedule_id                 VARCHAR(20) PRIMARY KEY,
+    schedule_id                 VARCHAR(20) PRIMARY KEY, -- PK Design Decision: Business identifier (e.g., NR_SCH01) is chosen as primary key for readability and stable referencing.
     line                        VARCHAR(10) NOT NULL,
     service_type                rail_service_type NOT NULL, 
     direction                   transit_direction NOT NULL,
-    origin_station_id           VARCHAR(10) REFERENCES national_rail_stations(station_id),
-    destination_station_id      VARCHAR(10) REFERENCES national_rail_stations(station_id),
-    stops_in_order              JSONB NOT NULL,
+    origin_station_id           VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id      VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
     passed_through_stations     JSONB NOT NULL DEFAULT '[]'::jsonb,
-    travel_time_from_origin_min JSONB NOT NULL,
     first_train_time            TIME        NOT NULL,
     last_train_time             TIME        NOT NULL,
     frequency_min               INTEGER     NOT NULL,
     operates_on                 JSONB NOT NULL,
     deleted_at                  TIMESTAMPTZ DEFAULT NULL,
     is_active                   BOOLEAN     NOT NULL DEFAULT TRUE
+);
+
+-- ============================================================
+--  STUDENT TASK — Normalized Schedule Stops Junction Tables
+-- ============================================================
+
+-- Junction table for Metro schedule stops
+CREATE TABLE metro_schedule_stops (
+    schedule_id                 VARCHAR(20)  REFERENCES metro_schedules(schedule_id) ON DELETE CASCADE,
+    station_id                  VARCHAR(10)  REFERENCES metro_stations(station_id) ON DELETE CASCADE,
+    stop_order                  INTEGER      NOT NULL,
+    travel_time_from_origin_min INTEGER      NOT NULL,
+    PRIMARY KEY (schedule_id, station_id)
+);
+
+-- Junction table for National Rail schedule stops
+CREATE TABLE national_rail_schedule_stops (
+    schedule_id                 VARCHAR(20)  REFERENCES national_rail_schedules(schedule_id) ON DELETE CASCADE,
+    station_id                  VARCHAR(10)  REFERENCES national_rail_stations(station_id) ON DELETE CASCADE,
+    stop_order                  INTEGER      NOT NULL,
+    travel_time_from_origin_min INTEGER      NOT NULL,
+    PRIMARY KEY (schedule_id, station_id)
 );
 
 -- 11. National rail fare classes
@@ -227,7 +250,7 @@ CREATE TABLE national_rail_seats (
 
 -- 17. Registered users table
 CREATE TABLE registered_users (
-    user_id       UUID         PRIMARY KEY,
+    user_id       UUID         PRIMARY KEY, -- PK Design Decision: UUID is used to ensure global uniqueness and prevent user ID enumeration/scraping attacks.
     full_name     VARCHAR(100), 
     email         VARCHAR(100) UNIQUE, 
     phone         VARCHAR(20),  
@@ -237,19 +260,20 @@ CREATE TABLE registered_users (
     is_active     BOOLEAN      NOT NULL DEFAULT TRUE
 );
 
--- 17.5 User credentials table (note: secret answer hashed, no plaintext)
 CREATE TABLE user_credentials (
-    user_id             UUID         PRIMARY KEY REFERENCES registered_users(user_id) ON DELETE CASCADE,
+    user_id             UUID         PRIMARY KEY REFERENCES registered_users(user_id) ON DELETE CASCADE, -- PK Design Decision: Shared primary key pattern (UUID) matching the registered_users table for efficient 1-to-1 relationship mapping.
     password_hash       VARCHAR(255) NOT NULL, 
+    password_salt       VARCHAR(64)  NOT NULL, -- CSPRNG generated salt for password
     secret_question     VARCHAR(250) NOT NULL,
-    secret_answer_hash  VARCHAR(255) NOT NULL, -- note
+    secret_answer_hash  VARCHAR(255) NOT NULL, 
+    secret_answer_salt  VARCHAR(64)  NOT NULL, -- CSPRNG generated salt for secret answer
     updated_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     deleted_at          TIMESTAMPTZ  DEFAULT NULL 
 );
 
 -- 18. National rail bookings (note: removed strong FK to schedules, use application-maintained reference; snapshot station names; larger amount precision)
 CREATE TABLE national_rail_bookings (
-    booking_id             VARCHAR(15)  PRIMARY KEY, 
+    booking_id             VARCHAR(15)  PRIMARY KEY, -- PK Design Decision: Business identifier (e.g. BK-XXXXXX) is used for external tracking and user convenience.
     user_id                UUID         REFERENCES registered_users(user_id) ON DELETE RESTRICT, -- avoid hard-deleting users causing orders to disappear
     schedule_id            VARCHAR(20), -- note: decoupled strong FK, allows old schedules to be deleted
     origin_station_id      VARCHAR(10), 
@@ -266,14 +290,14 @@ CREATE TABLE national_rail_bookings (
     amount_usd             NUMERIC(10,2) NOT NULL, -- note: increased amount precision to prevent overflow
     status                 booking_status  NOT NULL,
     booked_at              TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(), -- Mutable State Track requirement
     travelled_at           TIMESTAMPTZ,
     deleted_at             TIMESTAMPTZ  DEFAULT NULL 
 );
 
--- 18.5 Metro passes table (note: breaks self-reference in metro travel history)
 CREATE TABLE metro_passes (
-    pass_id     VARCHAR(15)  PRIMARY KEY,
-    user_id     UUID         REFERENCES registered_users(user_id),
+    pass_id     VARCHAR(15)  PRIMARY KEY, -- PK Design Decision: Business identifier (e.g. MP-XXXXXX) is used for external visibility and pass tracking.
+    user_id     UUID         REFERENCES registered_users(user_id) ON DELETE CASCADE,
     pass_type   pass_type  NOT NULL,
     expires_at  TIMESTAMPTZ,
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
@@ -281,7 +305,7 @@ CREATE TABLE metro_passes (
 
 -- 19. Metro travel history (note: decoupled schedule FK; snapshot station names; larger amount precision)
 CREATE TABLE metro_travel_history (
-    trip_id                VARCHAR(15)  PRIMARY KEY, 
+    trip_id                VARCHAR(15)  PRIMARY KEY, -- PK Design Decision: Business identifier (e.g. MT-XXXXXX) is used for external visibility.
     user_id                UUID         REFERENCES registered_users(user_id) ON DELETE RESTRICT,
     schedule_id            VARCHAR(20), -- note: decoupled strong FK
     origin_station_id      VARCHAR(10), 
@@ -296,40 +320,42 @@ CREATE TABLE metro_travel_history (
     status                 travel_status  NOT NULL,
     purchased_at           TIMESTAMPTZ,
     travelled_at           TIMESTAMPTZ,
+    updated_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(), -- Mutable State Track requirement
     deleted_at             TIMESTAMPTZ  DEFAULT NULL 
 );
 
 -- 20. Payments
 CREATE TABLE payments (
-    payment_id          VARCHAR(15)  PRIMARY KEY,
+    payment_id          VARCHAR(15)  PRIMARY KEY, -- PK Design Decision: Business identifier (e.g. PM-XXXXXX) is used for payment tracing.
     national_booking_id VARCHAR(15)  REFERENCES national_rail_bookings(booking_id) ON DELETE SET NULL,
     metro_trip_id       VARCHAR(15)  REFERENCES metro_travel_history(trip_id) ON DELETE SET NULL,
+    metro_pass_id       VARCHAR(15)  REFERENCES metro_passes(pass_id) ON DELETE SET NULL, -- Allow paying for metro passes
     amount_usd          NUMERIC(10,2) NOT NULL, 
     method              payment_method  NOT NULL,
     status              payment_status  NOT NULL,
     paid_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(), -- Mutable State Track requirement
     deleted_at          TIMESTAMPTZ  DEFAULT NULL, 
     CONSTRAINT check_polymorphic_payment CHECK (
-        (national_booking_id IS NOT NULL AND metro_trip_id IS NULL) OR
-        (national_booking_id IS NULL AND metro_trip_id IS NOT NULL)
+        num_nonnulls(national_booking_id, metro_trip_id, metro_pass_id) = 1
     )
 );
 
 -- 21. Feedback
 CREATE TABLE feedback (
-    feedback_id         VARCHAR(15)  PRIMARY KEY,
+    feedback_id         VARCHAR(15)  PRIMARY KEY, -- PK Design Decision: Business identifier (e.g. FB-XXXXXX) is used for support tickets/feedback tracing.
     national_booking_id VARCHAR(15)  REFERENCES national_rail_bookings(booking_id) ON DELETE SET NULL,
     metro_trip_id       VARCHAR(15)  REFERENCES metro_travel_history(trip_id) ON DELETE SET NULL,
-    user_id             UUID         REFERENCES registered_users(user_id),
+    user_id             UUID         REFERENCES registered_users(user_id) ON DELETE CASCADE,
     rating              INTEGER      NOT NULL CHECK (rating >= 1 AND rating <= 5),
     comment             TEXT,
     submitted_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     deleted_at          TIMESTAMPTZ  DEFAULT NULL, 
     CONSTRAINT check_polymorphic_feedback CHECK (
-        (national_booking_id IS NOT NULL AND metro_trip_id IS NULL) OR
-        (national_booking_id IS NULL AND metro_trip_id IS NOT NULL)
+        num_nonnulls(national_booking_id, metro_trip_id) = 1
     )
 );
+
 
 -- ============================================================
 --                     Performance index section
@@ -343,10 +369,10 @@ CREATE INDEX idx_metro_history_user_date ON metro_travel_history (user_id, trave
 CREATE INDEX idx_metro_sched_search ON metro_schedules (line, is_active);
 CREATE INDEX idx_nr_sched_search ON national_rail_schedules (line, service_type, is_active);
 
--- Optimize JSONB search inside schedules
-CREATE INDEX idx_metro_sched_stops ON metro_schedules USING GIN (stops_in_order);
+-- Optimize stops lookup inside schedules
+CREATE INDEX idx_metro_sched_stops ON metro_schedule_stops (station_id, stop_order);
 CREATE INDEX idx_metro_sched_operates ON metro_schedules USING GIN (operates_on);
-CREATE INDEX idx_nr_sched_stops ON national_rail_schedules USING GIN (stops_in_order);
+CREATE INDEX idx_nr_sched_stops ON national_rail_schedule_stops (station_id, stop_order);
 CREATE INDEX idx_nr_sched_operates ON national_rail_schedules USING GIN (operates_on);
 
 -- Partial indexes: reduce polymorphic join index size and improve cache hit rate
@@ -379,7 +405,6 @@ CREATE TABLE IF NOT EXISTS policy_documents (
 
 -- Index for fast cosine similarity search
 CREATE INDEX IF NOT EXISTS idx_policy_docs_embedding ON policy_documents USING hnsw (embedding vector_cosine_ops);
-
 ```
 
 ## Agreed Graph Schema
@@ -391,14 +416,26 @@ CREATE INDEX IF NOT EXISTS idx_policy_docs_embedding ON policy_documents USING h
 
 ```
 Node labels:
-- TODO
+- MetroStation: Represents a station in the city metro network.
+- NationalRailStation: Represents a station in the national rail network.
 
 Relationship types:
-- TODO
+- METRO_LINK: Connects two adjacent MetroStation nodes on a specific line.
+- RAIL_LINK: Connects two adjacent NationalRailStation nodes on a specific line.
+- INTERCHANGE_TO: Bi-directional link connecting a MetroStation and a NationalRailStation at physical transfer hubs.
 
 Key properties:
-- TODO
+- Nodes (MetroStation, NationalRailStation):
+  - id: VARCHAR (e.g. "MS01", "NR01") - unique business identifier of the station.
+  - name: VARCHAR (e.g. "Central Station") - station name.
+  - lines: LIST of strings (e.g. ["Red", "Blue"]) - lines running through the station.
+- Relationships (METRO_LINK, RAIL_LINK):
+  - line: String (e.g. "Red") - the transit line name.
+  - travel_time_min: Integer - travel duration between the two adjacent stations.
+  - cost_standard: Float - standard fare cost in USD (e.g. 0.30 for metro, 1.50 for rail).
+  - cost_first: Float - first-class fare cost in USD (e.g. 0.30 for metro, 2.50 for rail).
 ```
+
 
 ## Function Signatures We Are Implementing
 
@@ -444,8 +481,8 @@ def query_station_connections(station_id: str) -> list[dict]: ...
 
 <!-- Add entries as you make decisions. Format: "Decision: X. Why: Y." -->
 
-- [ ] Schema design: TODO — add your table/column decisions here
-- [ ] Graph schema: TODO — add your node label and relationship type decisions here
+- [x] Schema design: Normalized schedule stops into `metro_schedule_stops` and `national_rail_schedule_stops` junction tables; separated credentials into `user_credentials` table with Argon2id + CSPRNG salts and salt rotation; added `updated_at` columns for state tracking; simplified polymorphic checks using PostgreSQL `num_nonnulls()`.
+- [x] Graph schema: Node labels `MetroStation` and `NationalRailStation`; relationships `METRO_LINK` and `RAIL_LINK` with standard/first-class fare costs, and `INTERCHANGE_TO` for cross-network transfer links; pathfinding via APOC Dijkstra using relationship edge weights.
 - [x] Metro schedule stop ordering: using `jsonb_array_elements` approach — easier to debug than containment operators
 
 ## Prompts That Worked

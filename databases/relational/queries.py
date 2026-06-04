@@ -579,12 +579,13 @@ def execute_cancellation(booking_id: str, user_id: str) -> tuple[bool, dict | st
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             # 1. Lock and retrieve booking
             cur.execute("""
-                SELECT b.status, b.amount_usd, s.service_type
+                SELECT b.status, b.amount_usd, b.travel_date, b.departure_time, s.service_type
                 FROM national_rail_bookings b
                 JOIN national_rail_schedules s ON b.schedule_id = s.schedule_id
                 WHERE b.booking_id = %s AND b.user_id = %s
                 FOR UPDATE
             """, (booking_id, user_id))
+
             booking = cur.fetchone()
             
             if not booking:
@@ -636,16 +637,17 @@ def execute_cancellation(booking_id: str, user_id: str) -> tuple[bool, dict | st
             # 2. Update booking status
             cur.execute("""
                 UPDATE national_rail_bookings
-                SET status = 'cancelled', deleted_at = NOW()
+                SET status = 'cancelled', updated_at = NOW(), deleted_at = NOW()
                 WHERE booking_id = %s
             """, (booking_id,))
             
             # 3. Update payment status
             cur.execute("""
                 UPDATE payments
-                SET status = 'refunded'
+                SET status = 'refunded', updated_at = NOW()
                 WHERE national_booking_id = %s
             """, (booking_id,))
+
             
         conn.commit()
         return True, {"refund_amount_usd": float(refund_amount), "policy_note": policy_note}
