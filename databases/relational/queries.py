@@ -129,33 +129,57 @@ def query_national_rail_availability(
     destination_id: str,
     travel_date: Optional[str] = None,
 ) -> list[dict]:
-    """Retrieve all available national rail schedules between two stations."""
+    """
+    Retrieve all available national rail schedules between two stations.
+
+    Design Decision: To accurately report real-time available seat counts, we default
+    travel_date to date.today() if omitted, and perform a LEFT JOIN against the
+    national_rail_bookings table for the given date. Schedules are filtered using
+    the normalized national_rail_schedule_stops table to ensure they serve both stations
+    in the correct sequence order (origin stop_order < destination stop_order).
+    """
+    # Default to today's date if travel_date is not specified to calculate available seats
+    if not travel_date:
+        from datetime import date
+        travel_date = date.today().isoformat()
+
     sql = """
+        WITH total_seats AS (
+            SELECT l.schedule_id, COUNT(s.seat_id) AS total_seat_count
+            FROM national_rail_seat_layouts l
+            JOIN national_rail_seats s ON l.layout_id = s.layout_id
+            GROUP BY l.schedule_id
+        ),
+        booked_seats AS (
+            SELECT b.schedule_id, COUNT(b.seat_id) AS booked_seat_count
+            FROM national_rail_bookings b
+            WHERE b.travel_date = %s::date
+              AND b.status IN ('confirmed', 'completed')
+              AND b.deleted_at IS NULL
+            GROUP BY b.schedule_id
+        )
         SELECT 
             s.schedule_id, s.line, s.service_type, s.direction,
             s.first_train_time::text, s.last_train_time::text,
-            o.ord AS origin_order,
-            d.ord AS destination_order,
-            ((s.travel_time_from_origin_min->>(d.ord - 1))::int - (s.travel_time_from_origin_min->>(o.ord - 1))::int) AS travel_time_min,
-            (d.ord - o.ord) AS stops_travelled
+            o.stop_order AS origin_order,
+            d.stop_order AS destination_order,
+            (d.travel_time_from_origin_min - o.travel_time_from_origin_min) AS travel_time_min,
+            (d.stop_order - o.stop_order) AS stops_travelled,
+            (COALESCE(ts.total_seat_count, 0) - COALESCE(bs.booked_seat_count, 0))::int AS available_seats_count
         FROM national_rail_schedules s
-        CROSS JOIN LATERAL (
-            SELECT ordinality::int AS ord 
-            FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
-            WHERE value = %s LIMIT 1
-        ) o
-        CROSS JOIN LATERAL (
-            SELECT ordinality::int AS ord 
-            FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
-            WHERE value = %s LIMIT 1
-        ) d
+        JOIN national_rail_schedule_stops o ON s.schedule_id = o.schedule_id
+        JOIN national_rail_schedule_stops d ON s.schedule_id = d.schedule_id
+        LEFT JOIN total_seats ts ON s.schedule_id = ts.schedule_id
+        LEFT JOIN booked_seats bs ON s.schedule_id = bs.schedule_id
         WHERE s.is_active = TRUE
-          AND o.ord < d.ord
+          AND o.station_id = %s
+          AND d.station_id = %s
+          AND o.stop_order < d.stop_order
         ORDER BY s.first_train_time
     """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (origin_id, destination_id))
+            cur.execute(sql, (travel_date, origin_id, destination_id))
             return [dict(row) for row in cur.fetchall()]
 
 
@@ -185,25 +209,30 @@ def query_national_rail_fare(
 def query_metro_schedules(origin_id: str, destination_id: str) -> list[dict]:
     """Retrieve all available metro schedules between two stations."""
     sql = """
+        WITH schedule_stops_agg AS (
+            SELECT 
+                schedule_id,
+                json_agg(station_id ORDER BY stop_order) AS stops_in_order,
+                json_agg(travel_time_from_origin_min ORDER BY stop_order) AS travel_time_from_origin_min
+            FROM metro_schedule_stops
+            GROUP BY schedule_id
+        )
         SELECT 
             s.schedule_id, s.line, s.direction,
-            o.ord AS origin_order,
-            d.ord AS destination_order,
-            ((s.travel_time_from_origin_min->>(d.ord - 1))::int - (s.travel_time_from_origin_min->>(o.ord - 1))::int) AS travel_time_min,
-            (d.ord - o.ord) AS stops_travelled
+            o.stop_order AS origin_order,
+            d.stop_order AS destination_order,
+            (d.travel_time_from_origin_min - o.travel_time_from_origin_min) AS travel_time_min,
+            (d.stop_order - o.stop_order) AS stops_travelled,
+            agg.stops_in_order,
+            agg.travel_time_from_origin_min
         FROM metro_schedules s
-        CROSS JOIN LATERAL (
-            SELECT ordinality::int AS ord 
-            FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
-            WHERE value = %s LIMIT 1
-        ) o
-        CROSS JOIN LATERAL (
-            SELECT ordinality::int AS ord 
-            FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
-            WHERE value = %s LIMIT 1
-        ) d
+        JOIN metro_schedule_stops o ON s.schedule_id = o.schedule_id
+        JOIN metro_schedule_stops d ON s.schedule_id = d.schedule_id
+        JOIN schedule_stops_agg agg ON s.schedule_id = agg.schedule_id
         WHERE s.is_active = TRUE
-          AND o.ord < d.ord
+          AND o.station_id = %s
+          AND d.station_id = %s
+          AND o.stop_order < d.stop_order
     """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -378,26 +407,20 @@ def execute_booking(
     conn.autocommit = False
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            # 1. Retrieve route and station information (JSONB version)
+            # 1. Retrieve route and station information using normalized tables
             cur.execute("""
                 SELECT 
                     s.service_type,
-                    (s.travel_time_from_origin_min->>(o.ord - 1))::int AS o_time,
-                    (d.ord - o.ord) AS stops
+                    o.travel_time_from_origin_min AS o_time,
+                    (d.stop_order - o.stop_order) AS stops
                 FROM national_rail_schedules s
-                CROSS JOIN LATERAL (
-                    SELECT ordinality::int AS ord 
-                    FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
-                    WHERE value = %s LIMIT 1
-                ) o
-                CROSS JOIN LATERAL (
-                    SELECT ordinality::int AS ord 
-                    FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
-                    WHERE value = %s LIMIT 1
-                ) d
-                WHERE s.schedule_id = %s 
-                  AND o.ord < d.ord
-            """, (origin_station_id, destination_station_id, schedule_id))
+                JOIN national_rail_schedule_stops o ON s.schedule_id = o.schedule_id
+                JOIN national_rail_schedule_stops d ON s.schedule_id = d.schedule_id
+                WHERE s.schedule_id = %s
+                  AND o.station_id = %s
+                  AND d.station_id = %s
+                  AND o.stop_order < d.stop_order
+            """, (schedule_id, origin_station_id, destination_station_id))
             sched_info = cur.fetchone()
             if not sched_info or sched_info['stops'] <= 0:
                 raise ValueError("Invalid route or station order.")
@@ -458,6 +481,19 @@ def execute_booking(
                 if not seat_row:
                     raise ValueError("Invalid seat ID for this class/schedule.")
                 coach = seat_row['coach']
+                
+                # Double-booking check: verify this specific seat is not already booked
+                cur.execute("""
+                    SELECT 1 FROM national_rail_bookings
+                    WHERE schedule_id = %s 
+                      AND travel_date = %s 
+                      AND coach = %s 
+                      AND seat_id = %s 
+                      AND status IN ('confirmed', 'completed')
+                      AND deleted_at IS NULL
+                """, (schedule_id, travel_date, coach, actual_seat_id))
+                if cur.fetchone():
+                    raise ValueError(f"Seat {actual_seat_id} in coach {coach} is already booked on {travel_date}.")
 
             # 4. Insert booking record
             cur.execute("""
@@ -583,7 +619,13 @@ def register_user(
     email: str, first_name: str, surname: str, year_of_birth: int,
     password: str, secret_question: str, secret_answer: str,
 ) -> tuple[bool, str]:
-    """Register a new user with email, password, and security credentials. Returns (success, user_id_or_error)."""
+    """
+    Register a new user with email, password, and security credentials. Returns (success, user_id_or_error).
+
+    Design Decision: To prevent plaintext password leakage in compliance with guidelines,
+    all credentials (passwords, secret answers) are securely hashed using PBKDF2 with SHA-256
+    before database insertion. We use uuid.uuid4() for the unique identifier to avoid ID enumeration.
+    """
     # Generate UUID
     new_user_id = str(uuid.uuid4())
     date_of_birth = f"{year_of_birth}-01-01" # Assume simplified date format
@@ -602,7 +644,7 @@ def register_user(
             cur.execute("""
                 INSERT INTO user_credentials (user_id, password_hash, secret_question, secret_answer_hash)
                 VALUES (%s, %s, %s, %s)
-            """, (new_user_id, password, secret_question, secret_answer))
+            """, (new_user_id, _hash_password(password), secret_question, _hash_password(secret_answer.lower())))
             
         conn.commit()
         return True, new_user_id
@@ -631,7 +673,7 @@ def login_user(email: str, password: str) -> Optional[dict]:
     """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (email, password))
+            cur.execute(sql, (email, _hash_password(password)))
             row = cur.fetchone()
             if row:
                 # Parse first_name and surname to match agent expected format
@@ -669,8 +711,7 @@ def verify_secret_answer(email: str, answer: str) -> bool:
             cur.execute(sql, (email,))
             row = cur.fetchone()
             if row:
-                # Simple string comparison to match teaching materials
-                return row[0].lower() == answer.lower()
+                return row[0] == _hash_password(answer.lower())
             return False
 
 def update_password(email: str, new_password: str) -> bool:
@@ -685,7 +726,7 @@ def update_password(email: str, new_password: str) -> bool:
     """
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (new_password, email))
+            cur.execute(sql, (_hash_password(new_password), email))
             return cur.rowcount > 0
 
 
@@ -702,21 +743,32 @@ def query_policy_vector_search(embedding: list[float], top_k: int = VECTOR_TOP_K
     Returns:
         List of dicts with title, category, content, and similarity score
     """
+    from skeleton.config import LLM_PROVIDER
+    threshold = VECTOR_SIMILARITY_THRESHOLD
+    if LLM_PROVIDER == "ollama":
+        threshold = min(threshold, 0.3)
+
     sql = """
-        SELECT
-            title,
-            category,
-            content,
-            1 - (embedding <=> %s::vector) AS similarity
-        FROM policy_documents
-        WHERE 1 - (embedding <=> %s::vector) > %s
-        ORDER BY embedding <=> %s::vector
+        WITH unique_docs AS (
+            SELECT DISTINCT ON (title)
+                title,
+                category,
+                content,
+                1 - (embedding <=> %s::vector) AS similarity,
+                embedding <=> %s::vector AS distance
+            FROM policy_documents
+            ORDER BY title, distance
+        )
+        SELECT title, category, content, similarity
+        FROM unique_docs
+        WHERE similarity > %s
+        ORDER BY similarity DESC
         LIMIT %s
     """
     vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (vec_str, vec_str, VECTOR_SIMILARITY_THRESHOLD, vec_str, top_k))
+            cur.execute(sql, (vec_str, vec_str, threshold, top_k))
             return [dict(row) for row in cur.fetchall()]
 
 

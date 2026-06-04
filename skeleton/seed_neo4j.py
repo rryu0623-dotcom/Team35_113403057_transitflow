@@ -39,22 +39,16 @@ def seed():
         print("  Creating MetroStation nodes...")
         session.run("""
             UNWIND $stations AS s
-            CREATE (n:MetroStation {
-                id: s.station_id,
-                name: s.name,
-                lines: s.lines
-            })
+            MERGE (n:MetroStation {id: s.station_id})
+            SET n.name = s.name, n.lines = s.lines
         """, stations=metro_stations)
 
         # 2. 建立 NationalRailStation 節點
         print("  Creating NationalRailStation nodes...")
         session.run("""
             UNWIND $stations AS s
-            CREATE (n:NationalRailStation {
-                id: s.station_id,
-                name: s.name,
-                lines: s.lines
-            })
+            MERGE (n:NationalRailStation {id: s.station_id})
+            SET n.name = s.name, n.lines = s.lines
         """, stations=rail_stations)
 
         # 3. 建立 METRO_LINK 關係 (捷運路線)
@@ -65,7 +59,9 @@ def seed():
             UNWIND s.adjacent_stations AS adj
             MATCH (b:MetroStation {id: adj.station_id})
             MERGE (a)-[r:METRO_LINK {line: adj.line}]->(b)
-            SET r.travel_time_min = adj.travel_time_min
+            SET r.travel_time_min = adj.travel_time_min,
+                r.cost_standard = 0.30,
+                r.cost_first = 0.30
         """, stations=metro_stations)
 
         # 4. 建立 RAIL_LINK 關係 (國鐵路線)
@@ -76,7 +72,9 @@ def seed():
             UNWIND s.adjacent_stations AS adj
             MATCH (b:NationalRailStation {id: adj.station_id})
             MERGE (a)-[r:RAIL_LINK {line: adj.line}]->(b)
-            SET r.travel_time_min = adj.travel_time_min
+            SET r.travel_time_min = adj.travel_time_min,
+                r.cost_standard = 1.50,
+                r.cost_first = 2.50
         """, stations=rail_stations)
 
         # 5. 建立 INTERCHANGE_TO 轉乘關係 (雙向)

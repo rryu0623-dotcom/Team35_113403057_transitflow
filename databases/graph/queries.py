@@ -59,6 +59,11 @@ def query_shortest_route(
     Find the fastest path between two stations, minimising total travel time.
     Uses apoc.algo.dijkstra (APOC required; enabled in docker-compose.yml).
 
+    Design Decision: APOC Dijkstra is preferred over Cypher's shortestPath because
+    shortestPath only minimizes hops (station count), whereas Dijkstra correctly
+    calculates the path with the minimum sum of physical travel times.
+    """
+
     Args:
         origin_id:       e.g. "MS01" or "NR01"
         destination_id:  e.g. "MS09" or "NR05"
@@ -153,6 +158,14 @@ def query_cheapest_route(
 ) -> dict:
     """
     Find the cheapest path between two stations, minimising total estimated fare.
+    Uses apoc.algo.dijkstra with cost weights configured on relationships.
+
+    Design Decision: Since transit fares are computed as a base fare plus a per-stop rate,
+    we model standard/first-class fares as relationship properties (cost_standard, cost_first)
+    and use APOC Dijkstra to find the path that minimizes accumulated per-stop cost, adding the
+    base network fare at the end in Python. This ensures that route searches are truly optimized
+    by cost rather than hops or travel time.
+    """
 
     Args:
         origin_id:       e.g. "NR01"
@@ -168,6 +181,7 @@ def query_cheapest_route(
     
     label = "MetroStation" if network == "metro" else "NationalRailStation"
     link = "METRO_LINK" if network == "metro" else "RAIL_LINK"
+    cost_prop = "cost_first" if (network == "rail" and fare_class == "first") else "cost_standard"
     
     with _driver() as driver:
         with driver.session() as session:
@@ -189,13 +203,16 @@ def query_cheapest_route(
                     "legs": []
                 }
             
+            # Dijkstra pathfinding in Cypher using cost edge weights
             query = f"""
             MATCH (start:{label} {{id: $origin}})
             MATCH (end:{label} {{id: $destination}})
-            MATCH path = shortestPath((start)-[:{link}*]->(end))
+            CALL apoc.algo.dijkstra(start, end, '{link}', '{cost_prop}')
+            YIELD path, weight
             RETURN
               [node IN nodes(path) | {{id: node.id, name: node.name}}] AS path_nodes,
-              [rel IN relationships(path) | {{line: rel.line, travel_time_min: rel.travel_time_min}}] AS path_rels
+              [rel IN relationships(path) | {{line: rel.line, travel_time_min: rel.travel_time_min}}] AS path_rels,
+              weight AS total_fare_weight
             """
             res = session.run(query, origin=origin_id, destination=destination_id)
             row = res.single()
@@ -209,15 +226,10 @@ def query_cheapest_route(
             
             stations = row["path_nodes"]
             rels = row["path_rels"]
-            n_stops = len(rels)
             
-            if network == "metro":
-                total_fare_usd = 0.80 + 0.30 * n_stops
-            else:
-                if fare_class == "first":
-                    total_fare_usd = 4.00 + 2.50 * n_stops
-                else:
-                    total_fare_usd = 2.50 + 1.50 * n_stops
+            # Calculate base fare + accumulated cost weight
+            base_fare = 0.80 if network == "metro" else (4.00 if fare_class == "first" else 2.50)
+            total_fare_usd = base_fare + float(row["total_fare_weight"])
             
             legs = []
             for i in range(len(rels)):
