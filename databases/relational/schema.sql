@@ -237,6 +237,7 @@ CREATE TABLE national_rail_bookings (
     amount_usd             NUMERIC(10,2) NOT NULL, -- note: increased amount precision to prevent overflow
     status                 booking_status  NOT NULL,
     booked_at              TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(), -- Mutable State Track requirement
     travelled_at           TIMESTAMPTZ,
     deleted_at             TIMESTAMPTZ  DEFAULT NULL 
 );
@@ -266,6 +267,7 @@ CREATE TABLE metro_travel_history (
     status                 travel_status  NOT NULL,
     purchased_at           TIMESTAMPTZ,
     travelled_at           TIMESTAMPTZ,
+    updated_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(), -- Mutable State Track requirement
     deleted_at             TIMESTAMPTZ  DEFAULT NULL 
 );
 
@@ -274,14 +276,15 @@ CREATE TABLE payments (
     payment_id          VARCHAR(15)  PRIMARY KEY, -- PK Design Decision: Business identifier (e.g. PM-XXXXXX) is used for payment tracing.
     national_booking_id VARCHAR(15)  REFERENCES national_rail_bookings(booking_id) ON DELETE SET NULL,
     metro_trip_id       VARCHAR(15)  REFERENCES metro_travel_history(trip_id) ON DELETE SET NULL,
+    metro_pass_id       VARCHAR(15)  REFERENCES metro_passes(pass_id) ON DELETE SET NULL, -- Allow paying for metro passes
     amount_usd          NUMERIC(10,2) NOT NULL, 
     method              payment_method  NOT NULL,
     status              payment_status  NOT NULL,
     paid_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(), -- Mutable State Track requirement
     deleted_at          TIMESTAMPTZ  DEFAULT NULL, 
     CONSTRAINT check_polymorphic_payment CHECK (
-        (national_booking_id IS NOT NULL AND metro_trip_id IS NULL) OR
-        (national_booking_id IS NULL AND metro_trip_id IS NOT NULL)
+        num_nonnulls(national_booking_id, metro_trip_id, metro_pass_id) = 1
     )
 );
 
@@ -296,10 +299,10 @@ CREATE TABLE feedback (
     submitted_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     deleted_at          TIMESTAMPTZ  DEFAULT NULL, 
     CONSTRAINT check_polymorphic_feedback CHECK (
-        (national_booking_id IS NOT NULL AND metro_trip_id IS NULL) OR
-        (national_booking_id IS NULL AND metro_trip_id IS NOT NULL)
+        num_nonnulls(national_booking_id, metro_trip_id) = 1
     )
 );
+
 
 -- ============================================================
 --                     Performance index section
