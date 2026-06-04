@@ -210,8 +210,10 @@ CREATE TABLE registered_users (
 CREATE TABLE user_credentials (
     user_id             UUID         PRIMARY KEY REFERENCES registered_users(user_id) ON DELETE CASCADE, -- PK Design Decision: Shared primary key pattern (UUID) matching the registered_users table for efficient 1-to-1 relationship mapping.
     password_hash       VARCHAR(255) NOT NULL, 
+    password_salt       VARCHAR(64)  NOT NULL, -- CSPRNG generated salt for password
     secret_question     VARCHAR(250) NOT NULL,
-    secret_answer_hash  VARCHAR(255) NOT NULL, -- note
+    secret_answer_hash  VARCHAR(255) NOT NULL, 
+    secret_answer_salt  VARCHAR(64)  NOT NULL, -- CSPRNG generated salt for secret answer
     updated_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     deleted_at          TIMESTAMPTZ  DEFAULT NULL 
 );

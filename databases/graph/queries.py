@@ -62,7 +62,6 @@ def query_shortest_route(
     Design Decision: APOC Dijkstra is preferred over Cypher's shortestPath because
     shortestPath only minimizes hops (station count), whereas Dijkstra correctly
     calculates the path with the minimum sum of physical travel times.
-    """
 
     Args:
         origin_id:       e.g. "MS01" or "NR01"
@@ -165,7 +164,6 @@ def query_cheapest_route(
     and use APOC Dijkstra to find the path that minimizes accumulated per-stop cost, adding the
     base network fare at the end in Python. This ensures that route searches are truly optimized
     by cost rather than hops or travel time.
-    """
 
     Args:
         origin_id:       e.g. "NR01"

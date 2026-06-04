@@ -23,7 +23,8 @@ DATA_DIR    = os.path.join(PROJECT_DIR, "train-mock-data")
 
 sys.path.insert(0, PROJECT_DIR)
 from skeleton import config as cfg
-from databases.relational.queries import _hash_password
+from databases.relational.queries import _hash_password, _generate_salt, _hash_password_argon2
+
 
 
 def load(filename):
@@ -300,14 +301,21 @@ def seed_users(cur):
             u["is_active"]
         ))
         
-        # 【工業級優化點：高強度密碼與密保問答雜湊 PBKDF2】
+        # 【工業級優化點：高強度密碼與密保問答雜湊 Argon2id + CSPRNG Salt】
         # 教學範例原本直接將密碼與密保答案明文存入資料庫，這在生產環境下是非常嚴重的安全漏洞。
-        # 這裡改用從 queries 導入的 PBKDF2 密碼雜湊算法，確保資料庫中完全不儲存任何明文。
+        # 這裡改用 Argon2id 雜湊演算法與 CSPRNG 生成的 Salt，確保資料庫中完全不儲存任何明文，且防止彩虹表與雜湊碰撞攻擊。
+        pwd_salt = _generate_salt()
+        ans_salt = _generate_salt()
+        pwd_hash = _hash_password_argon2(u["password"], pwd_salt)
+        ans_hash = _hash_password_argon2(u["secret_answer"].lower(), ans_salt)
+
         creds_rows.append((
             real_uuid,
-            _hash_password(u["password"]),  # 儲存安全 PBKDF2 密碼雜湊
+            pwd_hash,
+            pwd_salt,
             u["secret_question"],
-            _hash_password(u["secret_answer"])  # 儲存安全 PBKDF2 密保答案雜湊
+            ans_hash,
+            ans_salt
         ))
         
     insert_many(
@@ -320,9 +328,10 @@ def seed_users(cur):
     insert_many(
         cur,
         "user_credentials",
-        ["user_id", "password_hash", "secret_question", "secret_answer_hash"],
+        ["user_id", "password_hash", "password_salt", "secret_question", "secret_answer_hash", "secret_answer_salt"],
         creds_rows
     )
+
     
     print(f"  registered_users & credentials seeded: {len(data)} users (mapped with secure random UUIDs)")
 
