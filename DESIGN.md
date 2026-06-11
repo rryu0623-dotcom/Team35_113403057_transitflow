@@ -95,7 +95,16 @@ SELECT AVG(rating)::float AS avg_rating, COUNT(*) AS total_feedbacks FROM feedba
 
 ---
 
-### 7.4 Verification and Testing
+### 7.4 Gradio UI Layout and Design
+We restructured the frontend to expose these Task 6 queries as responsive, interactive tabs and styled them with a custom CSS theme:
+1. **Glassmorphism Alert Cards**: Active alerts are color-coded (red, yellow, blue) using CSS borders and translucent backgrounds to grab attention instantly without looking cluttered.
+2. **Dynamic Timetables Markdown**: Dynamic departure results are formatted in clean Markdown tables with bold timestamps.
+3. **KPI Operational Cards**: Key system metrics (System Revenue, Rail Bookings, Metro Trips, Avg Rating) are styled as card grids with custom scaling transitions on hover.
+4. **HTML Banners**: Replaced standard headers with a modern linear-gradient banner styling.
+
+---
+
+### 7.5 Verification and Testing
 Automated seeder execution runs successfully and populates mock data:
 
 ```
@@ -126,4 +135,5 @@ Seeding tables (dependency order):
 All done. Database seeded successfully.
 ```
 
-The AI agent has been validated and robustly parses natural language query intents, routing them to the correct databases even in the presence of Ollama JSON schema hallucinations.
+The AI agent has been validated and robustly parses natural language query intents, routing them to the correct databases even in the presence of Ollama JSON schema hallucinations. All UI components have been verified via a headless browser subagent session, logging no errors and updating values dynamically upon clicking refresh and dropdown selections.
+

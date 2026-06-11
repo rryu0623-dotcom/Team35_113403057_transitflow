@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, ".")
 
 import gradio as gr
-from skeleton.agent import run_agent
+from skeleton.agent import run_agent, _STATION_INDEX
 from skeleton.llm_provider import llm
 from skeleton.config import GEMINI_CHAT_MODEL, OLLAMA_CHAT_MODEL
 from databases.relational.queries import (
@@ -20,6 +20,9 @@ from databases.relational.queries import (
     get_user_secret_question,
     verify_secret_answer,
     update_password,
+    query_active_alerts,
+    query_station_upcoming_departures,
+    query_transit_system_analytics,
 )
 
 SECRET_QUESTIONS = [
@@ -265,21 +268,347 @@ EXAMPLES = [
 ]
 
 
+# ── Custom CSS & Helper Functions for Task 6 Extensions ────────────────────────
+
+CUSTOM_CSS = """
+/* Google Fonts import */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@600;800&display=swap');
+
+/* Global font settings */
+body, .gradio-container {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+}
+
+/* Custom Alert classes (Light mode default) */
+.alerts-container {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 15px;
+}
+.alert-card {
+    border-radius: 10px;
+    padding: 16px 20px;
+    border-left: 6px solid;
+    background: rgba(0, 0, 0, 0.02);
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    transition: transform 0.2s;
+}
+.alert-card:hover {
+    transform: translateY(-2px);
+}
+.alert-high {
+    border-left: 6px solid #ff4d4f !important;
+    background: rgba(255, 77, 79, 0.04) !important;
+}
+.alert-medium {
+    border-left: 6px solid #faad14 !important;
+    background: rgba(250, 173, 20, 0.04) !important;
+}
+.alert-low {
+    border-left: 6px solid #1890ff !important;
+    background: rgba(24, 144, 255, 0.04) !important;
+}
+.alert-info {
+    border-left: 6px solid #52c41a !important;
+    background: rgba(82, 196, 26, 0.04) !important;
+}
+.alert-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+.badge {
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-weight: 700;
+    font-size: 0.75em;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+.badge-high { background-color: #ff4d4f; color: white; }
+.badge-medium { background-color: #faad14; color: black; }
+.badge-low { background-color: #1890ff; color: white; }
+.alert-line {
+    background: rgba(0, 0, 0, 0.05);
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+    font-size: 0.85em;
+    color: #374151;
+}
+.alert-station {
+    background: rgba(0, 0, 0, 0.05);
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+    font-size: 0.85em;
+    color: #374151;
+}
+.alert-time {
+    margin-left: auto;
+    color: #6b7280;
+    font-size: 0.8em;
+}
+.alert-body {
+    font-size: 0.95em;
+    line-height: 1.5;
+    color: #1f2937;
+}
+
+/* Analytics Dashboard styling (Light mode default) */
+.analytics-dashboard {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    margin-top: 15px;
+}
+.kpi-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+}
+.kpi-card {
+    background: linear-gradient(135deg, rgba(0,0,0,0.02), rgba(0,0,0,0.005));
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 14px;
+    padding: 24px 20px;
+    text-align: center;
+    box-shadow: 0 6px 15px rgba(0,0,0,0.05);
+    transition: transform 0.25s, box-shadow 0.25s;
+}
+.kpi-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 12px 25px rgba(0,0,0,0.1);
+    border-color: rgba(0, 0, 0, 0.15);
+}
+.kpi-val {
+    font-size: 2em;
+    font-weight: 700;
+    color: #0284c7;
+    margin-bottom: 6px;
+}
+.kpi-label {
+    font-size: 0.85em;
+    color: #4b5563;
+    font-weight: 500;
+    letter-spacing: 0.3px;
+}
+.details-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 20px;
+}
+.detail-box {
+    background: rgba(0,0,0,0.01);
+    border: 1px solid rgba(0,0,0,0.05);
+    border-radius: 12px;
+    padding: 20px;
+}
+.detail-box h4 {
+    margin-top: 0;
+    margin-bottom: 15px;
+    border-bottom: 1px solid rgba(0,0,0,0.08);
+    padding-bottom: 10px;
+    color: #1f2937;
+    font-size: 1.1em;
+    font-weight: 600;
+}
+.detail-box ul {
+    padding-left: 20px;
+    margin-bottom: 0;
+}
+.detail-box li {
+    margin-bottom: 10px;
+    color: #374151;
+    font-size: 0.95em;
+}
+
+/* ============================================================ */
+/* DARK MODE OVERRIDES (.dark class added by Gradio to body) */
+/* ============================================================ */
+.dark .alert-card {
+    background: rgba(255, 255, 255, 0.03) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2) !important;
+}
+.dark .alert-high {
+    background: rgba(255, 77, 79, 0.08) !important;
+}
+.dark .alert-medium {
+    background: rgba(250, 173, 20, 0.08) !important;
+}
+.dark .alert-low {
+    background: rgba(24, 144, 255, 0.08) !important;
+}
+.dark .alert-info {
+    background: rgba(82, 196, 26, 0.08) !important;
+}
+.dark .alert-body {
+    color: rgba(255, 255, 255, 0.85) !important;
+}
+.dark .alert-line, .dark .alert-station {
+    background: rgba(255, 255, 255, 0.12) !important;
+    border: 1px solid rgba(255,255,255,0.1) !important;
+    color: rgba(255, 255, 255, 0.85) !important;
+}
+.dark .alert-time {
+    color: rgba(255, 255, 255, 0.45) !important;
+}
+
+.dark .kpi-card {
+    background: linear-gradient(135deg, rgba(255,255,255,0.05), rgba(255,255,255,0.01)) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.15) !important;
+}
+.dark .kpi-card:hover {
+    border-color: rgba(255, 255, 255, 0.15) !important;
+}
+.dark .kpi-val {
+    color: #38bdf8 !important;
+}
+.dark .kpi-label {
+    color: rgba(255, 255, 255, 0.5) !important;
+}
+
+.dark .detail-box {
+    background: rgba(255,255,255,0.02) !important;
+    border: 1px solid rgba(255,255,255,0.06) !important;
+}
+.dark .detail-box h4 {
+    border-bottom: 1px solid rgba(255,255,255,0.1) !important;
+    color: rgba(255, 255, 255, 0.9) !important;
+}
+.dark .detail-box li {
+    color: rgba(255, 255, 255, 0.75) !important;
+}
+"""
+
+def get_alerts_html():
+    alerts = query_active_alerts()
+    if not alerts:
+        return "<div class='alert-card alert-info'>🟢 No active service alerts. All networks operating normally.</div>"
+    
+    html = "<div class='alerts-container'>"
+    for a in alerts:
+        sev = a["severity"].lower()
+        badge_class = f"badge-{sev}"
+        line_info = f"<span class='alert-line'>{a['line']}</span>" if a.get("line") else ""
+        station_info = f"<span class='alert-station'>{a['station_id']}</span>" if a.get("station_id") else ""
+        tags = " ".join(filter(None, [line_info, station_info]))
+        
+        html += f"""
+        <div class="alert-card alert-{sev}">
+            <div class="alert-header">
+                <span class="badge {badge_class}">{sev.upper()}</span>
+                {tags}
+                <span class="alert-time">{a.get('created_at', '')}</span>
+            </div>
+            <div class="alert-body">
+                {a['message']}
+            </div>
+        </div>
+        """
+    html += "</div>"
+    return html
+
+
+def get_departures_markdown(station_id: str):
+    if not station_id:
+        return "Please select a station to view departures."
+    departures = query_station_upcoming_departures(station_id)
+    if not departures:
+        return "No departures found for this station."
+    
+    md = "| Time | Type | Line | Direction | Destination |\n"
+    md += "| --- | --- | --- | --- | --- |\n"
+    for d in departures:
+        md += f"| **{d['departure_time']}** | {d['type']} | {d['line']} | {d['direction'].title()} | {d['destination']} |\n"
+    return md
+
+
+def get_analytics_html():
+    data = query_transit_system_analytics()
+    if not data:
+        return "<div style='padding: 20px; text-align: center; color: #888;'>No analytics data available.</div>"
+    
+    html = f"""
+    <div class="analytics-dashboard">
+        <div class="kpi-row">
+            <div class="kpi-card">
+                <div class="kpi-val">${data.get('total_system_revenue', 0.0):,.2f}</div>
+                <div class="kpi-label">Total System Revenue</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-val">{data.get('total_national_rail_bookings', 0):,}</div>
+                <div class="kpi-label">Rail Bookings</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-val">{data.get('total_metro_trips', 0):,}</div>
+                <div class="kpi-label">Metro Trips</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-val">⭐️ {data.get('average_user_rating', 0.0):.2f}/5</div>
+                <div class="kpi-label">Avg Rating ({data.get('total_feedbacks_received', 0)} reviews)</div>
+            </div>
+        </div>
+        
+        <div class="details-row">
+            <div class="detail-box">
+                <h4>🔥 Busiest Rail Origin Stations</h4>
+                <ul>
+    """
+    for s in data.get("top_rail_origin_stations", []):
+        html += f"<li><strong>{s['origin_station_name']}</strong>: {s['passenger_count']} passengers</li>"
+    if not data.get("top_rail_origin_stations"):
+        html += "<li>No data available</li>"
+        
+    html += """
+                </ul>
+            </div>
+            <div class="detail-box">
+                <h4>💳 Payment Method Breakdown</h4>
+                <ul>
+    """
+    for p in data.get("revenue_by_payment_method", []):
+        html += f"<li><strong>{p['method'].replace('_', ' ').title()}</strong>: {p['count']} payments (${p['revenue']:,.2f})</li>"
+    if not data.get("revenue_by_payment_method"):
+        html += "<li>No data available</li>"
+        
+    html += """
+                </ul>
+            </div>
+        </div>
+    </div>
+    """
+    return html
+
+station_choices = [
+    (f"{name.title()} ({sid})", sid)
+    for name, sid in sorted(_STATION_INDEX.items(), key=lambda x: x[1])
+]
+
 # ── Build UI ───────────────────────────────────────────────────────────────────
 
-with gr.Blocks(title="TransitFlow") as demo:
+with gr.Blocks(title="TransitFlow", css=CUSTOM_CSS) as demo:
 
     # ── Hidden state ──────────────────────────────────────────────────
     agent_history_state = gr.State([])
     current_user_state  = gr.State(None)   # None = guest, email str = logged in
 
-    # ── Header: title + auth buttons ─────────────────────────────────
+    # ── Header Banner ────────────────────────────────────────────────
     with gr.Row(equal_height=True):
-        gr.Markdown("""
-# 🚂 TransitFlow Intelligent Rail Assistant
-*Powered by PostgreSQL · pgvector · Neo4j · LLM*
-        """)
-        with gr.Column(scale=0, min_width=240):
+        gr.HTML("""
+        <div style="background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%); padding: 24px; border-radius: 16px; margin-bottom: 20px; color: white !important; box-shadow: 0 8px 32px rgba(0,0,0,0.15); width: 100%;">
+            <h1 style="margin: 0; color: white !important; font-weight: 800; font-size: 2.3em; font-family: 'Outfit', 'Inter', sans-serif; letter-spacing: -0.5px;">🚂 TransitFlow Intelligent Transit Assistant</h1>
+            <p style="margin: 8px 0 0 0; color: rgba(255, 255, 255, 0.9) !important; font-size: 1.15em; font-family: 'Inter', sans-serif;">Next-generation dual-network routing, live departures schedule, and operations analytics.</p>
+        </div>
+        """, scale=4)
+        with gr.Column(scale=1, min_width=240):
             with gr.Row():
                 login_btn    = gr.Button("👤 Login",    size="sm", variant="secondary")
                 register_btn = gr.Button("📝 Register", size="sm", variant="secondary")
@@ -325,30 +654,57 @@ with gr.Blocks(title="TransitFlow") as demo:
         forgot_msg               = gr.Markdown("")
         forgot_back_btn          = gr.Button("Back to login", size="sm")
 
-    # ── Main chat area ────────────────────────────────────────────────
+    # ── Main layout area ──────────────────────────────────────────────
     with gr.Row():
 
-        # ── Left: chat ────────────────────────────────────────────────
+        # ── Left: Main Panel Tabs ─────────────────────────────────────
         with gr.Column(scale=3):
-            chatbot = gr.Chatbot(label="TransitFlow Assistant", height=420)
+            with gr.Tabs():
+                with gr.Tab("💬 AI Chat Assistant"):
+                    chatbot = gr.Chatbot(label="TransitFlow Assistant", height=420)
 
-            with gr.Row():
-                msg = gr.Textbox(
-                    placeholder="Ask e.g. 'Are there seats from London to Bristol?'",
-                    show_label=False,
-                    scale=4,
-                )
-                send_btn = gr.Button("Send", variant="primary", scale=1)
+                    with gr.Row():
+                        msg = gr.Textbox(
+                            placeholder="Ask e.g. 'Are there seats from London to Bristol?'",
+                            show_label=False,
+                            scale=4,
+                        )
+                        send_btn = gr.Button("Send", variant="primary", scale=1)
 
-            with gr.Row():
-                clear_btn    = gr.Button("🗑️ Clear conversation", size="sm")
-                debug_toggle = gr.Checkbox(label="🔍 Show database debug panel", value=True)
+                    with gr.Row():
+                        clear_btn    = gr.Button("🗑️ Clear conversation", size="sm")
+                        debug_toggle = gr.Checkbox(label="🔍 Show database debug panel", value=True)
 
-            # Debug panel — hidden until checkbox is ticked and a message is sent
-            debug_panel = gr.Markdown(
-                value="",
-                visible=False,
-            )
+                    # Debug panel — hidden until checkbox is ticked and a message is sent
+                    debug_panel = gr.Markdown(
+                        value="",
+                        visible=False,
+                    )
+                    
+                with gr.Tab("⚠️ Service Alerts"):
+                    gr.Markdown("### 📢 Active Network & Operator Alerts")
+                    gr.Markdown("View real-time service disruptions, delays, or maintenance updates across the networks.")
+                    alerts_html = gr.HTML(value=get_alerts_html())
+                    refresh_alerts_btn = gr.Button("🔄 Refresh Service Alerts", size="sm")
+                    
+                with gr.Tab("🕒 Station Departures"):
+                    gr.Markdown("### 🕒 Real-Time Station Departures")
+                    gr.Markdown("Select a station to dynamically compute and display all scheduled train departures for today.")
+                    with gr.Row(equal_height=True):
+                        station_dd = gr.Dropdown(
+                            choices=station_choices,
+                            label="Select Transit Station",
+                            value="MS01",
+                            scale=3
+                        )
+                        get_departures_btn = gr.Button("🔍 Show Departures", variant="primary", scale=1)
+                    departures_table = gr.Markdown(value=get_departures_markdown("MS01"))
+                    
+                with gr.Tab("📊 System Analytics"):
+                    gr.Markdown("### 📊 System Operations & Analytics Dashboard")
+                    gr.Markdown("Aggregate real-time metrics showing total passenger volume, revenue, and satisfaction statistics.")
+                    analytics_html = gr.HTML(value=get_analytics_html())
+                    refresh_analytics_btn = gr.Button("🔄 Refresh Dashboard", size="sm")
 
         # ── Right: sidebar ────────────────────────────────────────────
         with gr.Column(scale=1):
@@ -484,11 +840,28 @@ with gr.Blocks(title="TransitFlow") as demo:
         ],
     )
 
-    # Forgot password — step 2: reset
-    forgot_reset_btn.click(
-        fn=forgot_reset_password,
-        inputs=[forgot_email_in, forgot_answer_in, forgot_new_password_in],
-        outputs=[forgot_msg],
+    # Operator Alerts Tab wiring
+    refresh_alerts_btn.click(
+        fn=get_alerts_html,
+        outputs=alerts_html,
+    )
+
+    # Station Departures Tab wiring
+    get_departures_btn.click(
+        fn=get_departures_markdown,
+        inputs=station_dd,
+        outputs=departures_table,
+    )
+    station_dd.change(
+        fn=get_departures_markdown,
+        inputs=station_dd,
+        outputs=departures_table,
+    )
+
+    # System Analytics Tab wiring
+    refresh_analytics_btn.click(
+        fn=get_analytics_html,
+        outputs=analytics_html,
     )
 
 
