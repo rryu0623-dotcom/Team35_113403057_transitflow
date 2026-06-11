@@ -1,3 +1,4 @@
+# TASK 6 EXTENSION: Added operator alerts seeding
 """
 Seed PostgreSQL with all TransitFlow mock data from train-mock-data/.
 
@@ -511,6 +512,17 @@ def seed_feedback(cur):
     print(f"  feedback seeded: {len(data)} polymorphic records")
 
 
+def seed_operator_alerts(cur):
+    """Seed operator_alerts table for the Task 6 Extension."""
+    alerts = [
+        ("AL001", "M1", "MS05", "high", "M1 line services are experiencing severe signaling delays at Elm Park (MS05). Please allow extra travel time."),
+        ("AL002", "NR2", "NR03", "medium", "NR2 rail service is operating with speed restrictions at Old Town Junction (NR03) due to urgent platform maintenance."),
+        ("AL003", None, None, "low", "System-wide announcement: Reminder to all passengers that off-peak fares apply all day on Sundays.")
+    ]
+    insert_many(cur, "operator_alerts", ["alert_id", "line", "station_id", "severity", "message"], alerts)
+    print(f"  operator_alerts seeded: {len(alerts)} alerts")
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -547,6 +559,9 @@ def main():
         
         print("- Feedback...")
         seed_feedback(cur)
+
+        print("- Operator Alerts (Task 6)...")
+        seed_operator_alerts(cur)
         
         conn.commit()
         print("\nAll done. Database seeded successfully.")

@@ -1,3 +1,4 @@
+-- TASK 6 EXTENSION: Added operator alerts table and custom booking extensions
 -- ============================================================
 --  TransitFlow PostgreSQL Schema
 --  Seed data is loaded separately by: python skeleton/seed_postgres.py
@@ -308,6 +309,20 @@ CREATE INDEX idx_feedback_metro_uid ON feedback (metro_trip_id) WHERE metro_trip
 -- Optimize backend interchange/pathfinding algorithms (core join columns for Dijkstra/A* search)
 CREATE INDEX idx_metro_adj_lookup ON metro_station_adjacents (station_id, adjacent_station_id);
 CREATE INDEX idx_nr_adj_lookup ON national_rail_station_adjacents (station_id, adjacent_station_id);
+
+-- ============================================================
+--  TASK 6 EXTENSION: Table for Operator Service Alerts
+-- ============================================================
+CREATE TABLE operator_alerts (
+    alert_id      VARCHAR(10)  PRIMARY KEY,
+    line          VARCHAR(10),
+    station_id    VARCHAR(10),
+    severity      VARCHAR(20)  NOT NULL, -- 'low', 'medium', 'high'
+    message       TEXT         NOT NULL,
+    created_at    TIMESTAMPTZ  DEFAULT NOW(),
+    is_active     BOOLEAN      DEFAULT TRUE
+);
+
 -- ============================================================
 --  VECTOR SCHEMA  (RAG / Help Desk) — do not modify
 -- ============================================================

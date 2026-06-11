@@ -1,3 +1,4 @@
+# TASK 6 EXTENSION: Custom departure time booking and operator alerts tools
 """
 TransitFlow — Intelligent Agent
 ================================
@@ -47,6 +48,9 @@ from databases.relational.queries import (
     execute_booking,
     execute_cancellation,
     query_policy_vector_search,
+    query_active_alerts,
+    query_station_upcoming_departures,
+    query_transit_system_analytics,
 )
 from databases.graph.queries import (
     query_shortest_route,
@@ -209,6 +213,7 @@ TOOLS = [
             "fare_class":             {"type": "string", "description": "standard or first"},
             "seat_id":                {"type": "string", "description": "Specific seat ID (e.g. B05) or 'any' for auto-assign"},
             "ticket_type":            {"type": "string", "description": "single or return (default single)"},
+            "departure_time":         {"type": "string", "description": "Specific departure time in HH:MM format (optional)"},
         },
         "required": ["schedule_id", "origin_station_id", "destination_station_id", "travel_date", "fare_class", "seat_id"],
     },
@@ -272,6 +277,26 @@ TOOLS = [
         },
         "required": ["station_id"],
     },
+    {
+        "name": "check_operator_alerts",
+        "description": "Retrieve active operator/service alerts regarding delays, closures, or maintenance.",
+        "parameters": {},
+        "required": []
+    },
+    {
+        "name": "get_upcoming_departures",
+        "description": "Retrieve all upcoming departures for a specific station (metro or national rail) for the day.",
+        "parameters": {
+            "station_id": {"type": "string", "description": "The station ID e.g. MS01 or NR03"}
+        },
+        "required": ["station_id"]
+    },
+    {
+        "name": "get_system_analytics",
+        "description": "Retrieve system-wide operations analytics including total bookings, revenue, ratings, and busiest stations.",
+        "parameters": {},
+        "required": []
+    }
 ]
 
 TOOLS_SCHEMA = """\
@@ -286,7 +311,10 @@ cancel_booking(booking_id)
 get_user_bookings()
 search_policy(query)
 find_alternative_routes(origin_id, destination_id, avoid_station_id, network?)
-get_delay_ripple(station_id, hops?)"""
+get_delay_ripple(station_id, hops?)
+check_operator_alerts()
+get_upcoming_departures(station_id)
+get_system_analytics()"""
 
 
 # ── Agent logic ───────────────────────────────────────────────────────────────
@@ -366,6 +394,7 @@ def _execute_tool(
                 fare_class=params["fare_class"],
                 seat_id=params["seat_id"],
                 ticket_type=params.get("ticket_type", "single"),
+                departure_time=params.get("departure_time"),
             )
             result = data if ok else {"error": data}
 
@@ -435,6 +464,15 @@ def _execute_tool(
                 delayed_station_id=params["station_id"],
                 hops=params.get("hops", 2),
             )
+
+        elif tool_name == "check_operator_alerts":
+            result = query_active_alerts()
+
+        elif tool_name == "get_upcoming_departures":
+            result = query_station_upcoming_departures(params["station_id"])
+
+        elif tool_name == "get_system_analytics":
+            result = query_transit_system_analytics()
 
         else:
             result = {"error": f"Unknown tool: {tool_name}"}
@@ -632,6 +670,24 @@ JSON:"""
         tool_calls = _parse_tool_calls(selection_response) or []
         if debug:
             debug_info.append(f"**Tool selection:** {selection_response}")
+
+    # Clean malformed/schema-hallucinated tool calls from LLM (especially Ollama)
+    cleaned_tool_calls = []
+    for tc in tool_calls:
+        params = tc.get("params") or {}
+        # If parameters contain JSON schema keywords, discard the tool call
+        if "properties" in params or "required" in params or "type" in params:
+            continue
+        # Also discard if any parameter value looks like a schema structure (dict with type or description keys)
+        has_schema_value = False
+        for v in params.values():
+            if isinstance(v, dict) and ("type" in v or "description" in v):
+                has_schema_value = True
+                break
+        if has_schema_value:
+            continue
+        cleaned_tool_calls.append(tc)
+    tool_calls = cleaned_tool_calls
 
     # ── Deterministic fallbacks ────────────────────────────────────────────────
     # llama3.2:1b is unreliable for tool routing on anything beyond trivial queries.

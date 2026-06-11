@@ -1,3 +1,4 @@
+# TASK 6 EXTENSION: Custom departure time booking and operator alerts queries
 """
 TransitFlow — PostgreSQL / Relational Database Layer
 =====================================================
@@ -369,8 +370,12 @@ def execute_booking(
     fare_class: str,
     seat_id: str,
     ticket_type: str = "single",
+    departure_time: Optional[str] = None,
 ) -> tuple[bool, dict | str]:
-    """Create a national rail booking for a logged-in user."""
+    """
+    Create a national rail booking for a logged-in user.
+    If departure_time is provided, use it. Otherwise, calculate the first train time.
+    """
     booking_id = _gen_booking_id()
     payment_id = _gen_payment_id()
     
@@ -402,12 +407,15 @@ def execute_booking(
             if not sched_info or sched_info['stops'] <= 0:
                 raise ValueError("Invalid route or station order.")
             
-            # Calculate departure time (first_train_time + origin station offset)
-            cur.execute("""
-                SELECT (first_train_time + (%s || ' minutes')::interval)::time AS dep_time
-                FROM national_rail_schedules WHERE schedule_id = %s
-            """, (sched_info['o_time'], schedule_id))
-            departure_time = cur.fetchone()['dep_time']
+            # Calculate departure time or use custom departure_time
+            if departure_time:
+                actual_departure_time = departure_time
+            else:
+                cur.execute("""
+                    SELECT (first_train_time + (%s || ' minutes')::interval)::time AS dep_time
+                    FROM national_rail_schedules WHERE schedule_id = %s
+                """, (sched_info['o_time'], schedule_id))
+                actual_departure_time = cur.fetchone()['dep_time']
             
             # Retrieve station names (Snapshot redundancy requirement)
             cur.execute("SELECT name FROM national_rail_stations WHERE station_id = %s", (origin_station_id,))
@@ -470,7 +478,7 @@ def execute_booking(
                 )
             """, (
                 booking_id, user_id, schedule_id, origin_station_id, origin_name,
-                destination_station_id, dest_name, travel_date, departure_time,
+                destination_station_id, dest_name, travel_date, actual_departure_time,
                 ticket_type, fare_class, coach, actual_seat_id, sched_info['stops'], amount_usd
             ))
             
@@ -744,3 +752,180 @@ def store_policy_document(
         with conn.cursor() as cur:
             cur.execute(sql, (title, category, content, vec_str, source_file))
             return cur.fetchone()[0]
+
+
+# ==============================================================================
+#  TASK 6 EXTENSION: New Relational Database Queries
+# ==============================================================================
+
+def query_active_alerts() -> list[dict]:
+    """
+    Retrieve all active operator/service alerts from the database.
+    
+    Returns:
+        List of dictionaries containing alert details (ID, line, station, severity, message).
+    """
+    sql = """
+        SELECT alert_id, line, station_id, severity, message, created_at::text, is_active
+        FROM operator_alerts
+        WHERE is_active = TRUE
+        ORDER BY severity = 'high' DESC, severity = 'medium' DESC, created_at DESC
+    """
+    with _connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql)
+            return [dict(row) for row in cur.fetchall()]
+
+
+def query_station_upcoming_departures(station_id: str) -> list[dict]:
+    """
+    Query all schedules containing the station and dynamically calculate and list
+    all departures for that station based on first train time, last train time,
+    and operating frequency.
+    
+    Args:
+        station_id: The ID of the station (e.g. MS01 or NR01)
+        
+    Returns:
+        List of dictionaries with departure info sorted chronologically.
+    """
+    departures = []
+    
+    # 1. Query metro schedules passing through
+    metro_sql = """
+        SELECT schedule_id, line, direction, first_train_time::text, last_train_time::text, frequency_min,
+               stops_in_order, travel_time_from_origin_min
+        FROM metro_schedules
+        WHERE is_active = TRUE
+    """
+    
+    # 2. Query rail schedules passing through
+    rail_sql = """
+        SELECT schedule_id, line, service_type::text, direction, first_train_time::text, last_train_time::text, frequency_min,
+               stops_in_order, travel_time_from_origin_min
+        FROM national_rail_schedules
+        WHERE is_active = TRUE
+    """
+    
+    from datetime import datetime, timedelta
+    
+    def parse_time(t_str: str) -> datetime:
+        return datetime.strptime(t_str, "%H:%M:%S" if len(t_str.split(":")) == 3 else "%H:%M")
+        
+    with _connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Check metro
+            cur.execute(metro_sql)
+            for row in cur.fetchall():
+                stops = row["stops_in_order"]
+                if isinstance(stops, str):
+                    stops = json.loads(stops)
+                if station_id in stops:
+                    idx = stops.index(station_id)
+                    times = row["travel_time_from_origin_min"]
+                    if isinstance(times, str):
+                        times = json.loads(times)
+                    offset = times[idx]
+                    
+                    first_dt = parse_time(row["first_train_time"])
+                    last_dt = parse_time(row["last_train_time"])
+                    freq = row["frequency_min"]
+                    
+                    curr_dt = first_dt
+                    while curr_dt <= last_dt:
+                        dep_dt = curr_dt + timedelta(minutes=offset)
+                        departures.append({
+                            "schedule_id": row["schedule_id"],
+                            "type": "Metro",
+                            "line": row["line"],
+                            "direction": row["direction"],
+                            "departure_time": dep_dt.strftime("%H:%M"),
+                            "destination": stops[-1]
+                        })
+                        curr_dt += timedelta(minutes=freq)
+                        
+            # Check rail
+            cur.execute(rail_sql)
+            for row in cur.fetchall():
+                stops = row["stops_in_order"]
+                if isinstance(stops, str):
+                    stops = json.loads(stops)
+                if station_id in stops:
+                    idx = stops.index(station_id)
+                    times = row["travel_time_from_origin_min"]
+                    if isinstance(times, str):
+                        times = json.loads(times)
+                    offset = times[idx]
+                    
+                    first_dt = parse_time(row["first_train_time"])
+                    last_dt = parse_time(row["last_train_time"])
+                    freq = row["frequency_min"]
+                    
+                    curr_dt = first_dt
+                    while curr_dt <= last_dt:
+                        dep_dt = curr_dt + timedelta(minutes=offset)
+                        departures.append({
+                            "schedule_id": row["schedule_id"],
+                            "type": f"Rail ({row['service_type']})",
+                            "line": row["line"],
+                            "direction": row["direction"],
+                            "departure_time": dep_dt.strftime("%H:%M"),
+                            "destination": stops[-1]
+                        })
+                        curr_dt += timedelta(minutes=freq)
+                        
+    departures.sort(key=lambda x: x["departure_time"])
+    return departures
+
+
+def query_transit_system_analytics() -> dict:
+    """
+    Query system-wide metrics from PostgreSQL relational tables to generate
+    an operations dashboard overview.
+    
+    Returns:
+        Dict containing total bookings, revenue, ratings, and top busy stations.
+    """
+    analytics = {}
+    
+    with _connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Total bookings and revenue
+            cur.execute("SELECT COUNT(*) AS count, SUM(amount_usd)::float AS revenue FROM national_rail_bookings WHERE status != 'cancelled';")
+            nr_stats = cur.fetchone()
+            cur.execute("SELECT COUNT(*) AS count, SUM(amount_usd)::float AS revenue FROM metro_travel_history WHERE status != 'cancelled';")
+            metro_stats = cur.fetchone()
+            
+            analytics["total_national_rail_bookings"] = nr_stats["count"] or 0
+            analytics["total_national_rail_revenue"] = round(nr_stats["revenue"] or 0.0, 2)
+            analytics["total_metro_trips"] = metro_stats["count"] or 0
+            analytics["total_metro_revenue"] = round(metro_stats["revenue"] or 0.0, 2)
+            analytics["total_system_revenue"] = round((analytics["total_national_rail_revenue"] + analytics["total_metro_revenue"]), 2)
+            
+            # Payment method breakdown
+            cur.execute("""
+                SELECT method, COUNT(*) AS count, SUM(amount_usd)::float AS revenue
+                FROM payments
+                WHERE status = 'paid'
+                GROUP BY method;
+            """)
+            analytics["revenue_by_payment_method"] = [dict(row) for row in cur.fetchall()]
+            
+            # Top 3 busy stations
+            cur.execute("""
+                SELECT origin_station_name, COUNT(*) AS passenger_count
+                FROM national_rail_bookings
+                WHERE status != 'cancelled'
+                GROUP BY origin_station_name
+                ORDER BY passenger_count DESC
+                LIMIT 3;
+            """)
+            analytics["top_rail_origin_stations"] = [dict(row) for row in cur.fetchall()]
+            
+            # Feedback rating stats
+            cur.execute("SELECT AVG(rating)::float AS avg_rating, COUNT(*) AS total_feedbacks FROM feedback;")
+            feedback_stats = cur.fetchone()
+            analytics["average_user_rating"] = round(feedback_stats["avg_rating"] or 0.0, 2)
+            analytics["total_feedbacks_received"] = feedback_stats["total_feedbacks"] or 0
+            
+    return analytics
