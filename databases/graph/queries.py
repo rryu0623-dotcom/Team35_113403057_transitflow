@@ -201,18 +201,28 @@ def query_cheapest_route(
                     "legs": []
                 }
             
-            # Dijkstra pathfinding in Cypher using cost edge weights
+            if network == "metro":
+                base_fare = 0.80
+                per_stop_rate = 0.30
+            else:
+                if fare_class == "first":
+                    base_fare = 4.00
+                    per_stop_rate = 2.50
+                else:
+                    base_fare = 2.50
+                    per_stop_rate = 1.50
+            
             query = f"""
             MATCH (start:{label} {{id: $origin}})
             MATCH (end:{label} {{id: $destination}})
-            CALL apoc.algo.dijkstra(start, end, '{link}', '{cost_prop}')
+            CALL apoc.algo.dijkstra(start, end, '{link}', 'fare_weight', $per_stop_rate)
             YIELD path, weight
             RETURN
               [node IN nodes(path) | {{id: node.id, name: node.name}}] AS path_nodes,
               [rel IN relationships(path) | {{line: rel.line, travel_time_min: rel.travel_time_min}}] AS path_rels,
-              weight AS total_fare_weight
+              weight AS variable_fare
             """
-            res = session.run(query, origin=origin_id, destination=destination_id)
+            res = session.run(query, origin=origin_id, destination=destination_id, per_stop_rate=float(per_stop_rate))
             row = res.single()
             if not row or not row["path_nodes"]:
                 return {
@@ -224,10 +234,7 @@ def query_cheapest_route(
             
             stations = row["path_nodes"]
             rels = row["path_rels"]
-            
-            # Calculate base fare + accumulated cost weight
-            base_fare = 0.80 if network == "metro" else (4.00 if fare_class == "first" else 2.50)
-            total_fare_usd = base_fare + float(row["total_fare_weight"])
+            total_fare_usd = base_fare + row["variable_fare"]
             
             legs = []
             for i in range(len(rels)):
@@ -410,11 +417,11 @@ def query_delay_ripple(delayed_station_id: str, hops: int = 2) -> list[dict]:
                     disrupted.id AS station_id,
                     disrupted.name AS name,
                     0 AS hops_away,
-                    disrupted.lines AS lines_affected
+                    coalesce(disrupted.lines, []) AS lines_affected
                 """
                 res = session.run(query, station_id=delayed_station_id)
                 return [dict(row) for row in res]
-
+                
             query = f"""
             MATCH (disrupted {{id: $station_id}})
             MATCH path = (disrupted)-[:METRO_LINK|RAIL_LINK|INTERCHANGE_TO*1..{hops_val}]-(affected)
@@ -423,7 +430,7 @@ def query_delay_ripple(delayed_station_id: str, hops: int = 2) -> list[dict]:
                 affected.id AS station_id,
                 affected.name AS name,
                 min(length(path)) AS hops_away,
-                affected.lines AS lines_affected
+                coalesce(affected.lines, []) AS lines_affected
             ORDER BY hops_away, station_id
             """
             res = session.run(query, station_id=delayed_station_id)

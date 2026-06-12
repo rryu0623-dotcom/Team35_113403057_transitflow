@@ -1,3 +1,4 @@
+# TASK 6 EXTENSION: Added operator alerts seeding
 """
 Seed PostgreSQL with all TransitFlow mock data from train-mock-data/.
 
@@ -142,7 +143,7 @@ def seed_metro_schedules(cur):
     data = load("metro_schedules.json")
     
     sched_rows = []
-    stops_rows = []
+    stop_rows = []
     for s in data:
         sched_rows.append((
             s["schedule_id"],
@@ -158,15 +159,9 @@ def seed_metro_schedules(cur):
             json.dumps(s["operates_on"]),
             True
         ))
-        
         for idx, sid in enumerate(s["stops_in_order"], start=1):
-            travel_time = s["travel_time_from_origin_min"][sid]
-            stops_rows.append((
-                s["schedule_id"],
-                sid,
-                idx,
-                travel_time
-            ))
+            time_val = s["travel_time_from_origin_min"][sid]
+            stop_rows.append((s["schedule_id"], sid, idx, time_val))
             
     insert_many(
         cur,
@@ -178,22 +173,37 @@ def seed_metro_schedules(cur):
         ],
         sched_rows
     )
-    
     insert_many(
         cur,
         "metro_schedule_stops",
         ["schedule_id", "station_id", "stop_order", "travel_time_from_origin_min"],
-        stops_rows
+        stop_rows
     )
     
-    print(f"  metro_schedules seeded: {len(data)} schedules, {len(stops_rows)} schedule stops")
+    print(f"  metro_schedules seeded: {len(data)} schedules, {len(stop_rows)} stops")
 
 
 def seed_national_rail_schedules(cur):
     data = load("national_rail_schedules.json")
     
+    PHYSICAL_STATIONS = {
+        ("NR1", "northbound"): ["NR01", "NR02", "NR03", "NR04", "NR05"],
+        ("NR1", "southbound"): ["NR05", "NR04", "NR03", "NR02", "NR01"],
+        ("NR2", "eastbound"): ["NR01", "NR06", "NR07", "NR08", "NR09", "NR10"],
+        ("NR2", "westbound"): ["NR10", "NR09", "NR08", "NR07", "NR06", "NR01"],
+    }
+    
+    NORMAL_ROUTE_TIMES = {
+        ("NR1", "northbound"): {"NR01": 0, "NR02": 12, "NR03": 30, "NR04": 45, "NR05": 65},
+        ("NR1", "southbound"): {"NR05": 0, "NR04": 20, "NR03": 35, "NR02": 53, "NR01": 65},
+        ("NR2", "eastbound"): {"NR01": 0, "NR06": 14, "NR07": 30, "NR08": 52, "NR09": 74, "NR10": 93},
+        ("NR2", "westbound"): {"NR10": 0, "NR09": 19, "NR08": 38, "NR07": 60, "NR06": 76, "NR01": 90},
+    }
+    
+    # 1. national_rail_schedules
     sched_rows = []
-    stops_rows = []
+    stop_rows = []
+    passed_rows = []
     for s in data:
         sched_rows.append((
             s["schedule_id"],
@@ -202,13 +212,18 @@ def seed_national_rail_schedules(cur):
             s["direction"].strip().lower() if s.get("direction") else "northbound",
             s["origin_station_id"],
             s["destination_station_id"],
-            json.dumps(s.get("passed_through_stations", [])),
             s["first_train_time"],
             s["last_train_time"],
             s["frequency_min"],
             json.dumps(s["operates_on"]),
             True
         ))
+        for idx, sid in enumerate(s["stops_in_order"], start=1):
+            time_val = s["travel_time_from_origin_min"][sid]
+            stop_rows.append((s["schedule_id"], sid, idx, time_val))
+            
+        for sid in s.get("passed_through_stations", []):
+            passed_rows.append((s["schedule_id"], sid))
         
         for idx, sid in enumerate(s["stops_in_order"], start=1):
             travel_time = s["travel_time_from_origin_min"][sid]
@@ -224,10 +239,22 @@ def seed_national_rail_schedules(cur):
         "national_rail_schedules",
         [
             "schedule_id", "line", "service_type", "direction", "origin_station_id", "destination_station_id",
-            "passed_through_stations", "first_train_time", "last_train_time", "frequency_min",
+            "first_train_time", "last_train_time", "frequency_min",
             "operates_on", "is_active"
         ],
         sched_rows
+    )
+    insert_many(
+        cur,
+        "national_rail_schedule_stops",
+        ["schedule_id", "station_id", "stop_order", "travel_time_from_origin_min"],
+        stop_rows
+    )
+    insert_many(
+        cur,
+        "national_rail_schedule_passed_through",
+        ["schedule_id", "station_id"],
+        passed_rows
     )
     
     insert_many(
@@ -243,7 +270,7 @@ def seed_national_rail_schedules(cur):
             fares_rows.append((s["schedule_id"], fare_class.strip().lower(), rates["base_fare_usd"], rates["per_stop_rate_usd"]))
     insert_many(cur, "national_rail_schedule_fares", ["schedule_id", "fare_class", "base_fare_usd", "per_stop_rate_usd"], fares_rows)
     
-    print(f"  national_rail_schedules seeded: {len(data)} schedules, {len(fares_rows)} class fares, {len(stops_rows)} schedule stops")
+    print(f"  national_rail_schedules seeded: {len(data)} schedules, {len(stop_rows)} stops, {len(passed_rows)} passed through")
 
 
 def seed_seat_layouts(cur):
@@ -277,12 +304,12 @@ def seed_seat_layouts(cur):
 def seed_users(cur):
     data = load("registered_users.json")
     
-    # Scheme A: 產生確定性 UUID 並填充用戶對照表
-    # 【工業級優化點：確定性 UUID (Deterministic UUID)】
-    # 原本使用 uuid.uuid4() 在重覆執行 seed_postgres.py 時會生成隨機新 UUID。
-    # 當新 UUID 因為 email UNIQUE 約束被資料庫略過（DO NOTHING）時，
-    # 記憶體中的 USER_UUID_MAP 會留下未寫入資料庫的 UUID，導致後續插入 bookings 時發生外鍵約束衝突 (FK Violation)。
-    # 改用 uuid.uuid5 基於 NAMESPACE_DNS 與 mock user_id 可確保每次執行都取得完全相同的 UUID，支持安全重複執行。
+    # Scheme A: Generate deterministic UUIDs and populate user mapping
+    # [Industrial-Grade Optimization: Deterministic UUID]
+    # Originally, using uuid.uuid4() would generate random new UUIDs upon re-running seed_postgres.py.
+    # When the new UUID is skipped by the database (DO NOTHING) due to the email UNIQUE constraint,
+    # the USER_UUID_MAP in memory would retain a UUID not written to the database, causing FK Violations when inserting bookings later.
+    # Using uuid.uuid5 based on NAMESPACE_DNS and mock user_id ensures the exact same UUID is obtained every time, supporting safe re-runs.
     users_rows = []
     creds_rows = []
     
@@ -301,21 +328,14 @@ def seed_users(cur):
             u["is_active"]
         ))
         
-        # 【工業級優化點：高強度密碼與密保問答雜湊 Argon2id + CSPRNG Salt】
-        # 教學範例原本直接將密碼與密保答案明文存入資料庫，這在生產環境下是非常嚴重的安全漏洞。
-        # 這裡改用 Argon2id 雜湊演算法與 CSPRNG 生成的 Salt，確保資料庫中完全不儲存任何明文，且防止彩虹表與雜湊碰撞攻擊。
-        pwd_salt = _generate_salt()
-        ans_salt = _generate_salt()
-        pwd_hash = _hash_password_argon2(u["password"], pwd_salt)
-        ans_hash = _hash_password_argon2(u["secret_answer"].lower(), ans_salt)
-
+        # [Industrial-Grade Optimization: High-strength password and secret question hashing with Argon2id]
+        # 
+        # Here we switch to the Argon2id password hashing algorithm imported from queries, ensuring no plain text is ever stored in the database.
         creds_rows.append((
             real_uuid,
-            pwd_hash,
-            pwd_salt,
+            _hash_password(u["password"]),  # Store secure Argon2id password hash
             u["secret_question"],
-            ans_hash,
-            ans_salt
+            _hash_password(u["secret_answer"].lower())  # Store secure Argon2id secret answer hash
         ))
         
     insert_many(
@@ -528,6 +548,17 @@ def seed_feedback(cur):
     print(f"  feedback seeded: {len(data)} polymorphic records")
 
 
+def seed_operator_alerts(cur):
+    """Seed operator_alerts table for the Task 6 Extension."""
+    alerts = [
+        ("AL001", "M1", "MS05", "high", "M1 line services are experiencing severe signaling delays at Elm Park (MS05). Please allow extra travel time."),
+        ("AL002", "NR2", "NR03", "medium", "NR2 rail service is operating with speed restrictions at Old Town Junction (NR03) due to urgent platform maintenance."),
+        ("AL003", None, None, "low", "System-wide announcement: Reminder to all passengers that off-peak fares apply all day on Sundays.")
+    ]
+    insert_many(cur, "operator_alerts", ["alert_id", "line", "station_id", "severity", "message"], alerts)
+    print(f"  operator_alerts seeded: {len(alerts)} alerts")
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -564,6 +595,9 @@ def main():
         
         print("- Feedback...")
         seed_feedback(cur)
+
+        print("- Operator Alerts (Task 6)...")
+        seed_operator_alerts(cur)
         
         conn.commit()
         print("\nAll done. Database seeded successfully.")

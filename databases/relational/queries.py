@@ -1,3 +1,4 @@
+# TASK 6 EXTENSION: Custom departure time booking and operator alerts queries
 """
 TransitFlow — PostgreSQL / Relational Database Layer
 =====================================================
@@ -36,22 +37,23 @@ from skeleton.config import PG_DSN, VECTOR_TOP_K, VECTOR_SIMILARITY_THRESHOLD
 
 
 # ==============================================================================
-#  工業級優化點：資料庫連線池 (Database Connection Pooling)
+#  Industrial-Grade Optimization: Database Connection Pooling
 # ==============================================================================
-# 原本的 _connect() 在每次查詢時都會向資料庫重新開啟一個實體 TCP 連線，
-# 這在高併發/高流量的生產環境中會造成巨大的延遲與連線數耗盡 (Connection Exhaustion) 的崩潰。
-# 這裡引入 ThreadedConnectionPool (最小 1 個連線，最大 20 個連線)。
+# The original _connect() opened a new physical TCP connection to the database
+# on every query, which would cause huge latency and connection exhaustion crashes
+# in high-concurrency/high-traffic production environments.
+# Here we introduce ThreadedConnectionPool (min 1 connection, max 20 connections).
 # 
-# 為了完美向後相容原本的 context manager (with _connect() as conn) 與手動 conn.close() 的寫法，
-# 我們設計了 ConnectionProxy 代理類別：
-# 1. 攔截 close()：呼叫 close() 時，不會真正關閉連線，而是安全地將連線歸還到 pool 中。
-# 2. 自動回收：當 context manager (__exit__) 結束時，自動執行 commit/rollback 並安全回收連線。
-# 3. 透明轉發：所有其他屬性與方法調用皆透明地委託給真實的 psycopg2 connection 物件。
+# To perfectly backwards-compatibilize the original context manager (with _connect() as conn) 
+# and manual conn.close() syntax, we designed a ConnectionProxy proxy class:
+# 1. Intercept close(): Calling close() doesn't actually close the connection, but safely returns it to the pool.
+# 2. Auto-recycle: When the context manager (__exit__) ends, it auto-executes commit/rollback and safely recycles the connection.
+# 3. Transparent forwarding: All other attribute and method calls are transparently delegated to the real psycopg2 connection object.
 # ==============================================================================
 from contextlib import contextmanager
 from psycopg2.pool import ThreadedConnectionPool
 
-# 全域 thread-safe 連線池 (min 1, max 20 connections)
+# Global thread-safe connection pool (min 1, max 20 connections)
 _pool = ThreadedConnectionPool(1, 20, PG_DSN)
 
 class ConnectionProxy:
@@ -60,7 +62,7 @@ class ConnectionProxy:
         self._pool = pool
         
     def __getattr__(self, name):
-        # 透明轉發所有屬性與方法給真實的 psycopg2 連線物件
+        # Transparently forward all attributes and methods to the real psycopg2 connection object
         return getattr(self._conn, name)
         
     def __enter__(self):
@@ -71,33 +73,39 @@ class ConnectionProxy:
         try:
             self._conn.__exit__(exc_type, exc_val, exc_tb)
         finally:
-            # 區塊退出時自動回收連線
+            # Automatically recycle the connection when exiting the block
             self.close()
         
     def close(self):
         try:
-            # Reset autocommit to True before returning to the pool to prevent side effects
-            self._conn.autocommit = True
-            # 將實體連線歸還給 ThreadedConnectionPool，而不是真的銷毀它
+            # Return the physical connection to the ThreadedConnectionPool instead of actually destroying it
             self._pool.putconn(self._conn)
         except Exception:
             pass
 
 
-def _connect(autocommit=True):
-    """從全域 ThreadedConnectionPool 借用一個連線，並包裝於 ConnectionProxy 中傳回。"""
+def _connect():
+    """Borrow a connection from the global ThreadedConnectionPool and return it wrapped in a ConnectionProxy."""
     conn = _pool.getconn()
     conn.autocommit = autocommit
     return ConnectionProxy(conn, _pool)
 
 
 def _hash_password(password: str) -> str:
-    """Hash password securely using PBKDF2 with SHA-256 and a static salt (built-in, zero dependencies)."""
-    import hashlib
-    import binascii
-    salt = b"transitflow_salt_secure_123"
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100000)
-    return binascii.hexlify(dk).decode()
+    """Hash password securely using Argon2id."""
+    from argon2 import PasswordHasher
+    ph = PasswordHasher()
+    return ph.hash(password)
+
+def _verify_password(hash: str, password: str) -> bool:
+    """Verify password against Argon2id hash."""
+    from argon2 import PasswordHasher
+    from argon2.exceptions import VerifyMismatchError
+    ph = PasswordHasher()
+    try:
+        return ph.verify(hash, password)
+    except VerifyMismatchError:
+        return False
 
 
 def _generate_salt() -> str:
@@ -171,20 +179,10 @@ def query_national_rail_availability(
     destination_id: str,
     travel_date: Optional[str] = None,
 ) -> list[dict]:
-    """
-    Retrieve all available national rail schedules between two stations.
-
-    Design Decision: To accurately report real-time available seat counts, we default
-    travel_date to date.today() if omitted, and perform a LEFT JOIN against the
-    national_rail_bookings table for the given date. Schedules are filtered using
-    the normalized national_rail_schedule_stops table to ensure they serve both stations
-    in the correct sequence order (origin stop_order < destination stop_order).
-    """
-    # Default to today's date if travel_date is not specified to calculate available seats
-    if not travel_date:
-        from datetime import date
-        travel_date = date.today().isoformat()
-
+    """Retrieve all available national rail schedules between two stations."""
+    if not travel_date or str(travel_date).strip().lower() == "none":
+        travel_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        
     sql = """
         WITH total_seats AS (
             SELECT l.schedule_id, COUNT(s.seat_id) AS total_seat_count
@@ -207,21 +205,32 @@ def query_national_rail_availability(
             d.stop_order AS destination_order,
             (d.travel_time_from_origin_min - o.travel_time_from_origin_min) AS travel_time_min,
             (d.stop_order - o.stop_order) AS stops_travelled,
-            (COALESCE(ts.total_seat_count, 0) - COALESCE(bs.booked_seat_count, 0))::int AS available_seats
+            (s.first_train_time + (o.travel_time_from_origin_min || ' minutes')::interval)::time::text AS departure_time,
+            (
+                SELECT COUNT(*) 
+                FROM national_rail_seats nrs
+                JOIN national_rail_coaches nrc ON nrs.layout_id = nrc.layout_id AND nrs.coach = nrc.coach
+                JOIN national_rail_seat_layouts nrsl ON nrc.layout_id = nrsl.layout_id
+                WHERE nrsl.schedule_id = s.schedule_id
+                  AND (nrs.coach, nrs.seat_id) NOT IN (
+                      SELECT coach, seat_id FROM national_rail_bookings b
+                      WHERE b.schedule_id = s.schedule_id 
+                        AND b.travel_date = %s 
+                        AND b.status IN ('confirmed', 'completed') 
+                        AND b.deleted_at IS NULL
+                  )
+            ) AS available_seats
         FROM national_rail_schedules s
-        JOIN national_rail_schedule_stops o ON s.schedule_id = o.schedule_id
-        JOIN national_rail_schedule_stops d ON s.schedule_id = d.schedule_id
-        LEFT JOIN total_seats ts ON s.schedule_id = ts.schedule_id
-        LEFT JOIN booked_seats bs ON s.schedule_id = bs.schedule_id
+        JOIN national_rail_schedule_stops o ON s.schedule_id = o.schedule_id AND o.station_id = %s
+        JOIN national_rail_schedule_stops d ON s.schedule_id = d.schedule_id AND d.station_id = %s
         WHERE s.is_active = TRUE
-          AND o.station_id = %s
-          AND d.station_id = %s
           AND o.stop_order < d.stop_order
+          AND s.operates_on ? TRIM(LOWER(to_char(%s::date, 'Dy')))
         ORDER BY s.first_train_time
     """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (travel_date, origin_id, destination_id))
+            cur.execute(sql, (travel_date, origin_id, destination_id, travel_date))
             return [dict(row) for row in cur.fetchall()]
 
 
@@ -242,7 +251,7 @@ def query_national_rail_fare(
     """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (stops_travelled, schedule_id, fare_class))
+            cur.execute(sql, (abs(stops_travelled), schedule_id, fare_class))
             row = cur.fetchone()
             return dict(row) if row else None
 
@@ -265,15 +274,17 @@ def query_metro_schedules(origin_id: str, destination_id: str) -> list[dict]:
             d.stop_order AS destination_order,
             (d.travel_time_from_origin_min - o.travel_time_from_origin_min) AS travel_time_min,
             (d.stop_order - o.stop_order) AS stops_travelled,
-            agg.stops_in_order,
-            agg.travel_time_from_origin_min
+            (
+                SELECT json_agg(station_id ORDER BY stop_order)
+                FROM metro_schedule_stops ms
+                WHERE ms.schedule_id = s.schedule_id 
+                  AND ms.stop_order >= o.stop_order 
+                  AND ms.stop_order <= d.stop_order
+            ) AS stops_in_order
         FROM metro_schedules s
-        JOIN metro_schedule_stops o ON s.schedule_id = o.schedule_id
-        JOIN metro_schedule_stops d ON s.schedule_id = d.schedule_id
-        JOIN schedule_stops_agg agg ON s.schedule_id = agg.schedule_id
+        JOIN metro_schedule_stops o ON s.schedule_id = o.schedule_id AND o.station_id = %s
+        JOIN metro_schedule_stops d ON s.schedule_id = d.schedule_id AND d.station_id = %s
         WHERE s.is_active = TRUE
-          AND o.station_id = %s
-          AND d.station_id = %s
           AND o.stop_order < d.stop_order
     """
     with _connect() as conn:
@@ -293,7 +304,7 @@ def query_metro_fare(schedule_id: str, stops_travelled: int) -> Optional[dict]:
     """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (stops_travelled, schedule_id))
+            cur.execute(sql, (abs(stops_travelled), schedule_id))
             row = cur.fetchone()
             return dict(row) if row else None
 
@@ -306,7 +317,9 @@ def query_available_seats(
     travel_date: str,
     fare_class: str,
 ) -> list[dict]:
-    """Retrieve all available seats for a national rail schedule on a given date and fare class."""
+    if not travel_date or str(travel_date).strip().lower() == "none":
+        travel_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        
     sql = """
         SELECT s.seat_id, s.coach, s.row, s.seat_column AS column
         FROM national_rail_seats s
@@ -444,8 +457,12 @@ def execute_booking(
     fare_class: str,
     seat_id: str,
     ticket_type: str = "single",
+    departure_time: Optional[str] = None,
 ) -> tuple[bool, dict | str]:
-    """Create a national rail booking for a logged-in user."""
+    """
+    Create a national rail booking for a logged-in user.
+    If departure_time is provided, use it. Otherwise, calculate the first train time.
+    """
     booking_id = _gen_booking_id()
     payment_id = _gen_payment_id()
     
@@ -453,30 +470,31 @@ def execute_booking(
     conn.autocommit = False
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            # 1. Retrieve route and station information using normalized tables
+            # 1. Retrieve route and station information
             cur.execute("""
                 SELECT 
                     s.service_type,
                     o.travel_time_from_origin_min AS o_time,
                     (d.stop_order - o.stop_order) AS stops
                 FROM national_rail_schedules s
-                JOIN national_rail_schedule_stops o ON s.schedule_id = o.schedule_id
-                JOIN national_rail_schedule_stops d ON s.schedule_id = d.schedule_id
-                WHERE s.schedule_id = %s
-                  AND o.station_id = %s
-                  AND d.station_id = %s
+                JOIN national_rail_schedule_stops o ON s.schedule_id = o.schedule_id AND o.station_id = %s
+                JOIN national_rail_schedule_stops d ON s.schedule_id = d.schedule_id AND d.station_id = %s
+                WHERE s.schedule_id = %s 
                   AND o.stop_order < d.stop_order
-            """, (schedule_id, origin_station_id, destination_station_id))
+            """, (origin_station_id, destination_station_id, schedule_id))
             sched_info = cur.fetchone()
             if not sched_info or sched_info['stops'] <= 0:
                 raise ValueError("Invalid route or station order.")
             
-            # Calculate departure time (first_train_time + origin station offset)
-            cur.execute("""
-                SELECT (first_train_time + (%s || ' minutes')::interval)::time AS dep_time
-                FROM national_rail_schedules WHERE schedule_id = %s
-            """, (sched_info['o_time'], schedule_id))
-            departure_time = cur.fetchone()['dep_time']
+            # Calculate departure time or use custom departure_time
+            if departure_time:
+                actual_departure_time = departure_time
+            else:
+                cur.execute("""
+                    SELECT (first_train_time + (%s || ' minutes')::interval)::time AS dep_time
+                    FROM national_rail_schedules WHERE schedule_id = %s
+                """, (sched_info['o_time'], schedule_id))
+                actual_departure_time = cur.fetchone()['dep_time']
             
             # Retrieve station names (Snapshot redundancy requirement)
             cur.execute("SELECT name FROM national_rail_stations WHERE station_id = %s", (origin_station_id,))
@@ -528,6 +546,19 @@ def execute_booking(
                 if not seat_row:
                     raise ValueError("Invalid seat ID for this class/schedule.")
                 coach = seat_row['coach']
+                
+                # Verify specific seat availability to prevent double booking
+                cur.execute("""
+                    SELECT 1 FROM national_rail_bookings
+                    WHERE schedule_id = %s 
+                      AND travel_date = %s 
+                      AND coach = %s 
+                      AND seat_id = %s 
+                      AND status IN ('confirmed', 'completed')
+                      AND deleted_at IS NULL
+                """, (schedule_id, travel_date, coach, actual_seat_id))
+                if cur.fetchone():
+                    raise ValueError(f"Seat {actual_seat_id} in coach {coach} is already booked.")
 
                 
                 # Double-booking check: verify this specific seat is not already booked
@@ -554,7 +585,7 @@ def execute_booking(
                 )
             """, (
                 booking_id, user_id, schedule_id, origin_station_id, origin_name,
-                destination_station_id, dest_name, travel_date, departure_time,
+                destination_station_id, dest_name, travel_date, actual_departure_time,
                 ticket_type, fare_class, coach, actual_seat_id, sched_info['stops'], amount_usd
             ))
             
@@ -707,9 +738,9 @@ def register_user(
             
             # 2. Insert authentication credentials
             cur.execute("""
-                INSERT INTO user_credentials (user_id, password_hash, password_salt, secret_question, secret_answer_hash, secret_answer_salt)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (new_user_id, pwd_hash, pwd_salt, secret_question, ans_hash, ans_salt))
+                INSERT INTO user_credentials (user_id, password_hash, secret_question, secret_answer_hash)
+                VALUES (%s, %s, %s, %s)
+            """, (new_user_id, _hash_password(password), secret_question, _hash_password(secret_answer.lower())))
             
         conn.commit()
         return True, new_user_id
@@ -728,8 +759,7 @@ def login_user(email: str, password: str) -> Optional[dict]:
     sql = """
         SELECT 
             u.user_id, u.email, u.full_name, u.phone, 
-            u.date_of_birth::text, u.is_active,
-            c.password_hash
+            u.date_of_birth::text, u.is_active, c.password_hash
         FROM registered_users u
         JOIN user_credentials c ON u.user_id = c.user_id
         WHERE u.email = %s 
@@ -740,15 +770,13 @@ def login_user(email: str, password: str) -> Optional[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, (email,))
             row = cur.fetchone()
-            if row:
-                stored_hash = row["password_hash"]
-                if _verify_password_argon2(stored_hash, password):
-                    row.pop("password_hash")
-                    # Parse first_name and surname to match agent expected format
-                    parts = row["full_name"].split(" ", 1)
-                    row["first_name"] = parts[0]
-                    row["surname"] = parts[1] if len(parts) > 1 else ""
-                    return dict(row)
+            if row and _verify_password(row["password_hash"], password):
+                # Parse first_name and surname to match agent expected format
+                parts = row["full_name"].split(" ", 1)
+                row["first_name"] = parts[0]
+                row["surname"] = parts[1] if len(parts) > 1 else ""
+                del row["password_hash"]
+                return dict(row)
             return None
 
 
@@ -780,21 +808,7 @@ def verify_secret_answer(email: str, answer: str) -> bool:
             cur.execute(sql, (email,))
             row = cur.fetchone()
             if row:
-                db_val = row[0]
-                # Case 1: If DB stores plaintext (e.g. TA live grading manually injected)
-                if db_val.lower() == answer.lower():
-                    return True
-                # Case 2: Argon2id hash check
-                if db_val.startswith("$argon2id$"):
-                    if _verify_password_argon2(db_val, answer.lower()):
-                        return True
-                    if _verify_password_argon2(db_val, answer):
-                        return True
-                # Case 3: Fallback check against the old PBKDF2 hash (just in case)
-                if db_val == _hash_password(answer.lower()):
-                    return True
-                if db_val == _hash_password(answer):
-                    return True
+                return _verify_password(row[0], answer.lower())
             return False
 
 
@@ -814,17 +828,8 @@ def update_password(email: str, new_password: str) -> bool:
     conn.autocommit = False # Start transaction
     try:
         with conn.cursor() as cur:
-            cur.execute(sql, (pwd_hash, pwd_salt, email))
-            rowcount = cur.rowcount
-        conn.commit()
-        return rowcount > 0
-    except Exception:
-        conn.rollback()
-        return False
-    finally:
-        conn.close()
-
-
+            cur.execute(sql, (_hash_password(new_password), email))
+            return cur.rowcount > 0
 
 
 # ── VECTOR / RAG QUERIES — do not modify ─────────────────────────────────────
@@ -893,3 +898,166 @@ def store_policy_document(
         with conn.cursor() as cur:
             cur.execute(sql, (title, category, content, vec_str, source_file))
             return cur.fetchone()[0]
+
+
+# ==============================================================================
+#  TASK 6 EXTENSION: New Relational Database Queries
+# ==============================================================================
+
+def query_active_alerts() -> list[dict]:
+    """
+    Retrieve all active operator/service alerts from the database.
+    
+    Returns:
+        List of dictionaries containing alert details (ID, line, station, severity, message).
+    """
+    sql = """
+        SELECT alert_id, line, station_id, severity, message, created_at::text, is_active
+        FROM operator_alerts
+        WHERE is_active = TRUE
+        ORDER BY severity = 'high' DESC, severity = 'medium' DESC, created_at DESC
+    """
+    with _connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql)
+            return [dict(row) for row in cur.fetchall()]
+
+
+def query_station_upcoming_departures(station_id: str) -> list[dict]:
+    """
+    Query all schedules containing the station and dynamically calculate and list
+    all departures for that station based on first train time, last train time,
+    and operating frequency.
+    
+    Args:
+        station_id: The ID of the station (e.g. MS01 or NR01)
+        
+    Returns:
+        List of dictionaries with departure info sorted chronologically.
+    """
+    departures = []
+    
+    # 1. Query metro schedules passing through
+    metro_sql = """
+        SELECT s.schedule_id, s.line, s.direction, s.first_train_time::text, s.last_train_time::text, s.frequency_min,
+               o.travel_time_from_origin_min, s.destination_station_id
+        FROM metro_schedules s
+        JOIN metro_schedule_stops o ON s.schedule_id = o.schedule_id AND o.station_id = %s
+        WHERE s.is_active = TRUE
+    """
+    
+    # 2. Query rail schedules passing through
+    rail_sql = """
+        SELECT s.schedule_id, s.line, s.service_type::text, s.direction, s.first_train_time::text, s.last_train_time::text, s.frequency_min,
+               o.travel_time_from_origin_min, s.destination_station_id
+        FROM national_rail_schedules s
+        JOIN national_rail_schedule_stops o ON s.schedule_id = o.schedule_id AND o.station_id = %s
+        WHERE s.is_active = TRUE
+    """
+    
+    from datetime import datetime, timedelta
+    
+    def parse_time(t_str: str) -> datetime:
+        return datetime.strptime(t_str, "%H:%M:%S" if len(t_str.split(":")) == 3 else "%H:%M")
+        
+    with _connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Check metro
+            cur.execute(metro_sql, (station_id,))
+            for row in cur.fetchall():
+                offset = row["travel_time_from_origin_min"]
+                
+                first_dt = parse_time(row["first_train_time"])
+                last_dt = parse_time(row["last_train_time"])
+                freq = row["frequency_min"]
+                
+                curr_dt = first_dt
+                while curr_dt <= last_dt:
+                    dep_dt = curr_dt + timedelta(minutes=offset)
+                    departures.append({
+                        "schedule_id": row["schedule_id"],
+                        "type": "Metro",
+                        "line": row["line"],
+                        "direction": row["direction"],
+                        "departure_time": dep_dt.strftime("%H:%M"),
+                        "destination": row["destination_station_id"]
+                    })
+                    curr_dt += timedelta(minutes=freq)
+                    
+            # Check rail
+            cur.execute(rail_sql, (station_id,))
+            for row in cur.fetchall():
+                offset = row["travel_time_from_origin_min"]
+                
+                first_dt = parse_time(row["first_train_time"])
+                last_dt = parse_time(row["last_train_time"])
+                freq = row["frequency_min"]
+                
+                curr_dt = first_dt
+                while curr_dt <= last_dt:
+                    dep_dt = curr_dt + timedelta(minutes=offset)
+                    departures.append({
+                        "schedule_id": row["schedule_id"],
+                        "type": f"Rail ({row['service_type']})",
+                        "line": row["line"],
+                        "direction": row["direction"],
+                        "departure_time": dep_dt.strftime("%H:%M"),
+                        "destination": row["destination_station_id"]
+                    })
+                    curr_dt += timedelta(minutes=freq)
+                    
+    departures.sort(key=lambda x: x["departure_time"])
+    return departures
+
+
+def query_transit_system_analytics() -> dict:
+    """
+    Query system-wide metrics from PostgreSQL relational tables to generate
+    an operations dashboard overview.
+    
+    Returns:
+        Dict containing total bookings, revenue, ratings, and top busy stations.
+    """
+    analytics = {}
+    
+    with _connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Total bookings and revenue
+            cur.execute("SELECT COUNT(*) AS count, SUM(amount_usd)::float AS revenue FROM national_rail_bookings WHERE status != 'cancelled';")
+            nr_stats = cur.fetchone()
+            cur.execute("SELECT COUNT(*) AS count, SUM(amount_usd)::float AS revenue FROM metro_travel_history WHERE status != 'cancelled';")
+            metro_stats = cur.fetchone()
+            
+            analytics["total_national_rail_bookings"] = nr_stats["count"] or 0
+            analytics["total_national_rail_revenue"] = round(nr_stats["revenue"] or 0.0, 2)
+            analytics["total_metro_trips"] = metro_stats["count"] or 0
+            analytics["total_metro_revenue"] = round(metro_stats["revenue"] or 0.0, 2)
+            analytics["total_system_revenue"] = round((analytics["total_national_rail_revenue"] + analytics["total_metro_revenue"]), 2)
+            
+            # Payment method breakdown
+            cur.execute("""
+                SELECT method, COUNT(*) AS count, SUM(amount_usd)::float AS revenue
+                FROM payments
+                WHERE status = 'paid'
+                GROUP BY method;
+            """)
+            analytics["revenue_by_payment_method"] = [dict(row) for row in cur.fetchall()]
+            
+            # Top 3 busy stations
+            cur.execute("""
+                SELECT origin_station_name, COUNT(*) AS passenger_count
+                FROM national_rail_bookings
+                WHERE status != 'cancelled'
+                GROUP BY origin_station_name
+                ORDER BY passenger_count DESC
+                LIMIT 3;
+            """)
+            analytics["top_rail_origin_stations"] = [dict(row) for row in cur.fetchall()]
+            
+            # Feedback rating stats
+            cur.execute("SELECT AVG(rating)::float AS avg_rating, COUNT(*) AS total_feedbacks FROM feedback;")
+            feedback_stats = cur.fetchone()
+            analytics["average_user_rating"] = round(feedback_stats["avg_rating"] or 0.0, 2)
+            analytics["total_feedbacks_received"] = feedback_stats["total_feedbacks"] or 0
+            
+    return analytics

@@ -1,3 +1,4 @@
+-- TASK 6 EXTENSION: Added operator alerts table and custom booking extensions
 -- ============================================================
 --  TransitFlow PostgreSQL Schema
 --  Seed data is loaded separately by: python skeleton/seed_postgres.py
@@ -106,13 +107,21 @@ CREATE TABLE station_interchanges (
     PRIMARY KEY (metro_station_id, national_rail_station_id)
 );
 
+-- ============================================================
+-- SCHEMA DESIGN DECISION: SOFT DELETE STRATEGY
+-- Soft delete strategy is applied consistently across all entities 
+-- using the `deleted_at TIMESTAMPTZ` column.
+-- This ensures historical integrity (e.g. keeping history) and 
+-- avoids breaking FK constraints when records are "deleted".
+-- ============================================================
+
 -- 7. Metro schedule table
 CREATE TABLE metro_schedules (
     schedule_id                 VARCHAR(20)  PRIMARY KEY, -- PK Design Decision: Business identifier (e.g., MS_SCH01) is chosen as primary key for readability and stable referencing.
     line                        VARCHAR(10)  NOT NULL,
     direction                   transit_direction  NOT NULL,
-    origin_station_id           VARCHAR(10)  REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
-    destination_station_id      VARCHAR(10)  REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
+    origin_station_id           VARCHAR(10)  REFERENCES metro_stations(station_id) ON DELETE CASCADE,
+    destination_station_id      VARCHAR(10)  REFERENCES metro_stations(station_id) ON DELETE CASCADE,
     first_train_time            TIME         NOT NULL,
     last_train_time             TIME         NOT NULL,
     base_fare_usd               NUMERIC(5,2) NOT NULL,
@@ -123,14 +132,23 @@ CREATE TABLE metro_schedules (
     is_active                   BOOLEAN      NOT NULL DEFAULT TRUE
 );
 
+-- 8. Metro schedule stops (junction table for Normalisation)
+CREATE TABLE metro_schedule_stops (
+    schedule_id                 VARCHAR(20) REFERENCES metro_schedules(schedule_id) ON DELETE CASCADE,
+    station_id                  VARCHAR(10) REFERENCES metro_stations(station_id) ON DELETE CASCADE,
+    stop_order                  INTEGER     NOT NULL,
+    travel_time_from_origin_min INTEGER     NOT NULL,
+    PRIMARY KEY (schedule_id, station_id)
+);
+
+-- 10. National rail schedule table
 CREATE TABLE national_rail_schedules (
     schedule_id                 VARCHAR(20) PRIMARY KEY, -- PK Design Decision: Business identifier (e.g., NR_SCH01) is chosen as primary key for readability and stable referencing.
     line                        VARCHAR(10) NOT NULL,
     service_type                rail_service_type NOT NULL, 
     direction                   transit_direction NOT NULL,
-    origin_station_id           VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
-    destination_station_id      VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
-    passed_through_stations     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    origin_station_id           VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE CASCADE,
+    destination_station_id      VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE CASCADE,
     first_train_time            TIME        NOT NULL,
     last_train_time             TIME        NOT NULL,
     frequency_min               INTEGER     NOT NULL,
@@ -139,25 +157,19 @@ CREATE TABLE national_rail_schedules (
     is_active                   BOOLEAN     NOT NULL DEFAULT TRUE
 );
 
--- ============================================================
---  STUDENT TASK — Normalized Schedule Stops Junction Tables
--- ============================================================
-
--- Junction table for Metro schedule stops
-CREATE TABLE metro_schedule_stops (
-    schedule_id                 VARCHAR(20)  REFERENCES metro_schedules(schedule_id) ON DELETE CASCADE,
-    station_id                  VARCHAR(10)  REFERENCES metro_stations(station_id) ON DELETE CASCADE,
-    stop_order                  INTEGER      NOT NULL,
-    travel_time_from_origin_min INTEGER      NOT NULL,
+-- 10.1 National rail schedule stops (junction table for Normalisation)
+CREATE TABLE national_rail_schedule_stops (
+    schedule_id                 VARCHAR(20) REFERENCES national_rail_schedules(schedule_id) ON DELETE CASCADE,
+    station_id                  VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE CASCADE,
+    stop_order                  INTEGER     NOT NULL,
+    travel_time_from_origin_min INTEGER     NOT NULL,
     PRIMARY KEY (schedule_id, station_id)
 );
 
--- Junction table for National Rail schedule stops
-CREATE TABLE national_rail_schedule_stops (
-    schedule_id                 VARCHAR(20)  REFERENCES national_rail_schedules(schedule_id) ON DELETE CASCADE,
-    station_id                  VARCHAR(10)  REFERENCES national_rail_stations(station_id) ON DELETE CASCADE,
-    stop_order                  INTEGER      NOT NULL,
-    travel_time_from_origin_min INTEGER      NOT NULL,
+-- 10.2 National rail passed through stations (junction table for Normalisation)
+CREATE TABLE national_rail_schedule_passed_through (
+    schedule_id VARCHAR(20) REFERENCES national_rail_schedules(schedule_id) ON DELETE CASCADE,
+    station_id  VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE CASCADE,
     PRIMARY KEY (schedule_id, station_id)
 );
 
@@ -196,6 +208,11 @@ CREATE TABLE national_rail_seats (
 );
 
 -- 17. Registered users table
+-- ============================================================
+-- SCHEMA DESIGN DECISION: PRIMARY KEY (UUID vs SERIAL)
+-- We chose UUID over SERIAL for user_id to prevent enumeration
+-- attacks and allow for distributed/offline generation if needed.
+-- ============================================================
 CREATE TABLE registered_users (
     user_id       UUID         PRIMARY KEY, -- PK Design Decision: UUID is used to ensure global uniqueness and prevent user ID enumeration/scraping attacks.
     full_name     VARCHAR(100), 
@@ -316,10 +333,8 @@ CREATE INDEX idx_metro_history_user_date ON metro_travel_history (user_id, trave
 CREATE INDEX idx_metro_sched_search ON metro_schedules (line, is_active);
 CREATE INDEX idx_nr_sched_search ON national_rail_schedules (line, service_type, is_active);
 
--- Optimize stops lookup inside schedules
-CREATE INDEX idx_metro_sched_stops ON metro_schedule_stops (station_id, stop_order);
+-- Optimize JSONB search inside schedules
 CREATE INDEX idx_metro_sched_operates ON metro_schedules USING GIN (operates_on);
-CREATE INDEX idx_nr_sched_stops ON national_rail_schedule_stops (station_id, stop_order);
 CREATE INDEX idx_nr_sched_operates ON national_rail_schedules USING GIN (operates_on);
 
 -- Partial indexes: reduce polymorphic join index size and improve cache hit rate
@@ -331,6 +346,20 @@ CREATE INDEX idx_feedback_metro_uid ON feedback (metro_trip_id) WHERE metro_trip
 -- Optimize backend interchange/pathfinding algorithms (core join columns for Dijkstra/A* search)
 CREATE INDEX idx_metro_adj_lookup ON metro_station_adjacents (station_id, adjacent_station_id);
 CREATE INDEX idx_nr_adj_lookup ON national_rail_station_adjacents (station_id, adjacent_station_id);
+
+-- ============================================================
+--  TASK 6 EXTENSION: Table for Operator Service Alerts
+-- ============================================================
+CREATE TABLE operator_alerts (
+    alert_id      VARCHAR(10)  PRIMARY KEY,
+    line          VARCHAR(10),
+    station_id    VARCHAR(10),
+    severity      VARCHAR(20)  NOT NULL, -- 'low', 'medium', 'high'
+    message       TEXT         NOT NULL,
+    created_at    TIMESTAMPTZ  DEFAULT NOW(),
+    is_active     BOOLEAN      DEFAULT TRUE
+);
+
 -- ============================================================
 --  VECTOR SCHEMA  (RAG / Help Desk) — do not modify
 -- ============================================================
