@@ -388,11 +388,23 @@ def query_delay_ripple(delayed_station_id: str, hops: int = 2) -> list[dict]:
         List of dicts: {station_id, name, hops_away, lines_affected}
     """
     hops_val = int(hops)
-    if hops_val < 1:
+    if hops_val < 0:
         return []
         
     with _driver() as driver:
         with driver.session() as session:
+            if hops_val == 0:
+                query = """
+                MATCH (disrupted {id: $station_id})
+                RETURN
+                    disrupted.id AS station_id,
+                    disrupted.name AS name,
+                    0 AS hops_away,
+                    coalesce(disrupted.lines, []) AS lines_affected
+                """
+                res = session.run(query, station_id=delayed_station_id)
+                return [dict(row) for row in res]
+                
             query = f"""
             MATCH (disrupted {{id: $station_id}})
             MATCH path = (disrupted)-[:METRO_LINK|RAIL_LINK|INTERCHANGE_TO*1..{hops_val}]-(affected)
@@ -401,7 +413,7 @@ def query_delay_ripple(delayed_station_id: str, hops: int = 2) -> list[dict]:
                 affected.id AS station_id,
                 affected.name AS name,
                 min(length(path)) AS hops_away,
-                affected.lines AS lines_affected
+                coalesce(affected.lines, []) AS lines_affected
             ORDER BY hops_away, station_id
             """
             res = session.run(query, station_id=delayed_station_id)

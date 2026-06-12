@@ -104,15 +104,16 @@ CREATE TABLE station_interchanges (
     PRIMARY KEY (metro_station_id, national_rail_station_id)
 );
 
+-- Soft delete strategy: applied consistently across all entities using deleted_at TIMESTAMPTZ.
+-- This ensures historical integrity (e.g. keeping history) and avoids breaking FK constraints.
+
 -- 7. Metro schedule table
 CREATE TABLE metro_schedules (
     schedule_id                 VARCHAR(20)  PRIMARY KEY,
     line                        VARCHAR(10)  NOT NULL,
     direction                   transit_direction  NOT NULL,
-    origin_station_id           VARCHAR(10)  REFERENCES metro_stations(station_id),
-    destination_station_id      VARCHAR(10)  REFERENCES metro_stations(station_id),
-    stops_in_order              JSONB        NOT NULL,
-    travel_time_from_origin_min JSONB        NOT NULL,
+    origin_station_id           VARCHAR(10)  REFERENCES metro_stations(station_id) ON DELETE CASCADE,
+    destination_station_id      VARCHAR(10)  REFERENCES metro_stations(station_id) ON DELETE CASCADE,
     first_train_time            TIME         NOT NULL,
     last_train_time             TIME         NOT NULL,
     base_fare_usd               NUMERIC(5,2) NOT NULL,
@@ -123,23 +124,45 @@ CREATE TABLE metro_schedules (
     is_active                   BOOLEAN      NOT NULL DEFAULT TRUE
 );
 
+-- 8. Metro schedule stops (junction table for Normalisation)
+CREATE TABLE metro_schedule_stops (
+    schedule_id                 VARCHAR(20) REFERENCES metro_schedules(schedule_id) ON DELETE CASCADE,
+    station_id                  VARCHAR(10) REFERENCES metro_stations(station_id) ON DELETE CASCADE,
+    stop_order                  INTEGER     NOT NULL,
+    travel_time_from_origin_min INTEGER     NOT NULL,
+    PRIMARY KEY (schedule_id, station_id)
+);
+
 -- 10. National rail schedule table
 CREATE TABLE national_rail_schedules (
     schedule_id                 VARCHAR(20) PRIMARY KEY,
     line                        VARCHAR(10) NOT NULL,
     service_type                rail_service_type NOT NULL, 
     direction                   transit_direction NOT NULL,
-    origin_station_id           VARCHAR(10) REFERENCES national_rail_stations(station_id),
-    destination_station_id      VARCHAR(10) REFERENCES national_rail_stations(station_id),
-    stops_in_order              JSONB NOT NULL,
-    passed_through_stations     JSONB NOT NULL DEFAULT '[]'::jsonb,
-    travel_time_from_origin_min JSONB NOT NULL,
+    origin_station_id           VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE CASCADE,
+    destination_station_id      VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE CASCADE,
     first_train_time            TIME        NOT NULL,
     last_train_time             TIME        NOT NULL,
     frequency_min               INTEGER     NOT NULL,
     operates_on                 JSONB NOT NULL,
     deleted_at                  TIMESTAMPTZ DEFAULT NULL,
     is_active                   BOOLEAN     NOT NULL DEFAULT TRUE
+);
+
+-- 10.1 National rail schedule stops (junction table for Normalisation)
+CREATE TABLE national_rail_schedule_stops (
+    schedule_id                 VARCHAR(20) REFERENCES national_rail_schedules(schedule_id) ON DELETE CASCADE,
+    station_id                  VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE CASCADE,
+    stop_order                  INTEGER     NOT NULL,
+    travel_time_from_origin_min INTEGER     NOT NULL,
+    PRIMARY KEY (schedule_id, station_id)
+);
+
+-- 10.2 National rail passed through stations (junction table for Normalisation)
+CREATE TABLE national_rail_schedule_passed_through (
+    schedule_id VARCHAR(20) REFERENCES national_rail_schedules(schedule_id) ON DELETE CASCADE,
+    station_id  VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE CASCADE,
+    PRIMARY KEY (schedule_id, station_id)
 );
 
 -- 11. National rail fare classes
@@ -178,6 +201,7 @@ CREATE TABLE national_rail_seats (
 
 -- 17. Registered users table
 CREATE TABLE registered_users (
+    -- UUID chosen to prevent enumeration attacks and allow distributed generation
     user_id       UUID         PRIMARY KEY,
     full_name     VARCHAR(100), 
     email         VARCHAR(100) UNIQUE, 
@@ -295,9 +319,7 @@ CREATE INDEX idx_metro_sched_search ON metro_schedules (line, is_active);
 CREATE INDEX idx_nr_sched_search ON national_rail_schedules (line, service_type, is_active);
 
 -- Optimize JSONB search inside schedules
-CREATE INDEX idx_metro_sched_stops ON metro_schedules USING GIN (stops_in_order);
 CREATE INDEX idx_metro_sched_operates ON metro_schedules USING GIN (operates_on);
-CREATE INDEX idx_nr_sched_stops ON national_rail_schedules USING GIN (stops_in_order);
 CREATE INDEX idx_nr_sched_operates ON national_rail_schedules USING GIN (operates_on);
 
 -- Partial indexes: reduce polymorphic join index size and improve cache hit rate

@@ -91,12 +91,20 @@ def _connect():
 
 
 def _hash_password(password: str) -> str:
-    """Hash password securely using PBKDF2 with SHA-256 and a static salt (built-in, zero dependencies)."""
-    import hashlib
-    import binascii
-    salt = b"transitflow_salt_secure_123"
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100000)
-    return binascii.hexlify(dk).decode()
+    """Hash password securely using Argon2id."""
+    from argon2 import PasswordHasher
+    ph = PasswordHasher()
+    return ph.hash(password)
+
+def _verify_password(hash: str, password: str) -> bool:
+    """Verify password against Argon2id hash."""
+    from argon2 import PasswordHasher
+    from argon2.exceptions import VerifyMismatchError
+    ph = PasswordHasher()
+    try:
+        return ph.verify(hash, password)
+    except VerifyMismatchError:
+        return False
 
 
 def _gen_booking_id() -> str:
@@ -135,23 +143,15 @@ def query_national_rail_availability(
         SELECT 
             s.schedule_id, s.line, s.service_type, s.direction,
             s.first_train_time::text, s.last_train_time::text,
-            o.ord AS origin_order,
-            d.ord AS destination_order,
-            ((s.travel_time_from_origin_min->>(d.ord - 1))::int - (s.travel_time_from_origin_min->>(o.ord - 1))::int) AS travel_time_min,
-            (d.ord - o.ord) AS stops_travelled
+            o.stop_order AS origin_order,
+            d.stop_order AS destination_order,
+            (d.travel_time_from_origin_min - o.travel_time_from_origin_min) AS travel_time_min,
+            (d.stop_order - o.stop_order) AS stops_travelled
         FROM national_rail_schedules s
-        CROSS JOIN LATERAL (
-            SELECT ordinality::int AS ord 
-            FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
-            WHERE value = %s LIMIT 1
-        ) o
-        CROSS JOIN LATERAL (
-            SELECT ordinality::int AS ord 
-            FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
-            WHERE value = %s LIMIT 1
-        ) d
+        JOIN national_rail_schedule_stops o ON s.schedule_id = o.schedule_id AND o.station_id = %s
+        JOIN national_rail_schedule_stops d ON s.schedule_id = d.schedule_id AND d.station_id = %s
         WHERE s.is_active = TRUE
-          AND o.ord < d.ord
+          AND o.stop_order < d.stop_order
         ORDER BY s.first_train_time
     """
     with _connect() as conn:
@@ -177,7 +177,7 @@ def query_national_rail_fare(
     """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (stops_travelled, schedule_id, fare_class))
+            cur.execute(sql, (abs(stops_travelled), schedule_id, fare_class))
             row = cur.fetchone()
             return dict(row) if row else None
 
@@ -188,23 +188,15 @@ def query_metro_schedules(origin_id: str, destination_id: str) -> list[dict]:
     sql = """
         SELECT 
             s.schedule_id, s.line, s.direction,
-            o.ord AS origin_order,
-            d.ord AS destination_order,
-            ((s.travel_time_from_origin_min->>(d.ord - 1))::int - (s.travel_time_from_origin_min->>(o.ord - 1))::int) AS travel_time_min,
-            (d.ord - o.ord) AS stops_travelled
+            o.stop_order AS origin_order,
+            d.stop_order AS destination_order,
+            (d.travel_time_from_origin_min - o.travel_time_from_origin_min) AS travel_time_min,
+            (d.stop_order - o.stop_order) AS stops_travelled
         FROM metro_schedules s
-        CROSS JOIN LATERAL (
-            SELECT ordinality::int AS ord 
-            FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
-            WHERE value = %s LIMIT 1
-        ) o
-        CROSS JOIN LATERAL (
-            SELECT ordinality::int AS ord 
-            FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
-            WHERE value = %s LIMIT 1
-        ) d
+        JOIN metro_schedule_stops o ON s.schedule_id = o.schedule_id AND o.station_id = %s
+        JOIN metro_schedule_stops d ON s.schedule_id = d.schedule_id AND d.station_id = %s
         WHERE s.is_active = TRUE
-          AND o.ord < d.ord
+          AND o.stop_order < d.stop_order
     """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -223,7 +215,7 @@ def query_metro_fare(schedule_id: str, stops_travelled: int) -> Optional[dict]:
     """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (stops_travelled, schedule_id))
+            cur.execute(sql, (abs(stops_travelled), schedule_id))
             row = cur.fetchone()
             return dict(row) if row else None
 
@@ -383,25 +375,17 @@ def execute_booking(
     conn.autocommit = False
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            # 1. Retrieve route and station information (JSONB version)
+            # 1. Retrieve route and station information
             cur.execute("""
                 SELECT 
                     s.service_type,
-                    (s.travel_time_from_origin_min->>(o.ord - 1))::int AS o_time,
-                    (d.ord - o.ord) AS stops
+                    o.travel_time_from_origin_min AS o_time,
+                    (d.stop_order - o.stop_order) AS stops
                 FROM national_rail_schedules s
-                CROSS JOIN LATERAL (
-                    SELECT ordinality::int AS ord 
-                    FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
-                    WHERE value = %s LIMIT 1
-                ) o
-                CROSS JOIN LATERAL (
-                    SELECT ordinality::int AS ord 
-                    FROM jsonb_array_elements_text(s.stops_in_order) WITH ORDINALITY 
-                    WHERE value = %s LIMIT 1
-                ) d
+                JOIN national_rail_schedule_stops o ON s.schedule_id = o.schedule_id AND o.station_id = %s
+                JOIN national_rail_schedule_stops d ON s.schedule_id = d.schedule_id AND d.station_id = %s
                 WHERE s.schedule_id = %s 
-                  AND o.ord < d.ord
+                  AND o.stop_order < d.stop_order
             """, (origin_station_id, destination_station_id, schedule_id))
             sched_info = cur.fetchone()
             if not sched_info or sched_info['stops'] <= 0:
@@ -466,6 +450,19 @@ def execute_booking(
                 if not seat_row:
                     raise ValueError("Invalid seat ID for this class/schedule.")
                 coach = seat_row['coach']
+                
+                # Verify specific seat availability to prevent double booking
+                cur.execute("""
+                    SELECT 1 FROM national_rail_bookings
+                    WHERE schedule_id = %s 
+                      AND travel_date = %s 
+                      AND coach = %s 
+                      AND seat_id = %s 
+                      AND status IN ('confirmed', 'completed')
+                      AND deleted_at IS NULL
+                """, (schedule_id, travel_date, coach, actual_seat_id))
+                if cur.fetchone():
+                    raise ValueError(f"Seat {actual_seat_id} in coach {coach} is already booked.")
 
             # 4. Insert booking record
             cur.execute("""
@@ -610,7 +607,7 @@ def register_user(
             cur.execute("""
                 INSERT INTO user_credentials (user_id, password_hash, secret_question, secret_answer_hash)
                 VALUES (%s, %s, %s, %s)
-            """, (new_user_id, password, secret_question, secret_answer))
+            """, (new_user_id, _hash_password(password), secret_question, _hash_password(secret_answer)))
             
         conn.commit()
         return True, new_user_id
@@ -629,23 +626,23 @@ def login_user(email: str, password: str) -> Optional[dict]:
     sql = """
         SELECT 
             u.user_id, u.email, u.full_name, u.phone, 
-            u.date_of_birth::text, u.is_active
+            u.date_of_birth::text, u.is_active, c.password_hash
         FROM registered_users u
         JOIN user_credentials c ON u.user_id = c.user_id
         WHERE u.email = %s 
-          AND c.password_hash = %s 
           AND u.is_active = TRUE
           AND u.deleted_at IS NULL
     """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (email, password))
+            cur.execute(sql, (email,))
             row = cur.fetchone()
-            if row:
+            if row and _verify_password(row["password_hash"], password):
                 # Parse first_name and surname to match agent expected format
                 parts = row["full_name"].split(" ", 1)
                 row["first_name"] = parts[0]
                 row["surname"] = parts[1] if len(parts) > 1 else ""
+                del row["password_hash"]
                 return dict(row)
             return None
 
@@ -677,8 +674,7 @@ def verify_secret_answer(email: str, answer: str) -> bool:
             cur.execute(sql, (email,))
             row = cur.fetchone()
             if row:
-                # Simple string comparison to match teaching materials
-                return row[0].lower() == answer.lower()
+                return _verify_password(row[0], answer)
             return False
 
 def update_password(email: str, new_password: str) -> bool:
@@ -693,7 +689,7 @@ def update_password(email: str, new_password: str) -> bool:
     """
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (new_password, email))
+            cur.execute(sql, (_hash_password(new_password), email))
             return cur.rowcount > 0
 
 
@@ -793,18 +789,20 @@ def query_station_upcoming_departures(station_id: str) -> list[dict]:
     
     # 1. Query metro schedules passing through
     metro_sql = """
-        SELECT schedule_id, line, direction, first_train_time::text, last_train_time::text, frequency_min,
-               stops_in_order, travel_time_from_origin_min
-        FROM metro_schedules
-        WHERE is_active = TRUE
+        SELECT s.schedule_id, s.line, s.direction, s.first_train_time::text, s.last_train_time::text, s.frequency_min,
+               o.travel_time_from_origin_min, s.destination_station_id
+        FROM metro_schedules s
+        JOIN metro_schedule_stops o ON s.schedule_id = o.schedule_id AND o.station_id = %s
+        WHERE s.is_active = TRUE
     """
     
     # 2. Query rail schedules passing through
     rail_sql = """
-        SELECT schedule_id, line, service_type::text, direction, first_train_time::text, last_train_time::text, frequency_min,
-               stops_in_order, travel_time_from_origin_min
-        FROM national_rail_schedules
-        WHERE is_active = TRUE
+        SELECT s.schedule_id, s.line, s.service_type::text, s.direction, s.first_train_time::text, s.last_train_time::text, s.frequency_min,
+               o.travel_time_from_origin_min, s.destination_station_id
+        FROM national_rail_schedules s
+        JOIN national_rail_schedule_stops o ON s.schedule_id = o.schedule_id AND o.station_id = %s
+        WHERE s.is_active = TRUE
     """
     
     from datetime import datetime, timedelta
@@ -815,65 +813,49 @@ def query_station_upcoming_departures(station_id: str) -> list[dict]:
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             # Check metro
-            cur.execute(metro_sql)
+            cur.execute(metro_sql, (station_id,))
             for row in cur.fetchall():
-                stops = row["stops_in_order"]
-                if isinstance(stops, str):
-                    stops = json.loads(stops)
-                if station_id in stops:
-                    idx = stops.index(station_id)
-                    times = row["travel_time_from_origin_min"]
-                    if isinstance(times, str):
-                        times = json.loads(times)
-                    offset = times[idx]
+                offset = row["travel_time_from_origin_min"]
+                
+                first_dt = parse_time(row["first_train_time"])
+                last_dt = parse_time(row["last_train_time"])
+                freq = row["frequency_min"]
+                
+                curr_dt = first_dt
+                while curr_dt <= last_dt:
+                    dep_dt = curr_dt + timedelta(minutes=offset)
+                    departures.append({
+                        "schedule_id": row["schedule_id"],
+                        "type": "Metro",
+                        "line": row["line"],
+                        "direction": row["direction"],
+                        "departure_time": dep_dt.strftime("%H:%M"),
+                        "destination": row["destination_station_id"]
+                    })
+                    curr_dt += timedelta(minutes=freq)
                     
-                    first_dt = parse_time(row["first_train_time"])
-                    last_dt = parse_time(row["last_train_time"])
-                    freq = row["frequency_min"]
-                    
-                    curr_dt = first_dt
-                    while curr_dt <= last_dt:
-                        dep_dt = curr_dt + timedelta(minutes=offset)
-                        departures.append({
-                            "schedule_id": row["schedule_id"],
-                            "type": "Metro",
-                            "line": row["line"],
-                            "direction": row["direction"],
-                            "departure_time": dep_dt.strftime("%H:%M"),
-                            "destination": stops[-1]
-                        })
-                        curr_dt += timedelta(minutes=freq)
-                        
             # Check rail
-            cur.execute(rail_sql)
+            cur.execute(rail_sql, (station_id,))
             for row in cur.fetchall():
-                stops = row["stops_in_order"]
-                if isinstance(stops, str):
-                    stops = json.loads(stops)
-                if station_id in stops:
-                    idx = stops.index(station_id)
-                    times = row["travel_time_from_origin_min"]
-                    if isinstance(times, str):
-                        times = json.loads(times)
-                    offset = times[idx]
+                offset = row["travel_time_from_origin_min"]
+                
+                first_dt = parse_time(row["first_train_time"])
+                last_dt = parse_time(row["last_train_time"])
+                freq = row["frequency_min"]
+                
+                curr_dt = first_dt
+                while curr_dt <= last_dt:
+                    dep_dt = curr_dt + timedelta(minutes=offset)
+                    departures.append({
+                        "schedule_id": row["schedule_id"],
+                        "type": f"Rail ({row['service_type']})",
+                        "line": row["line"],
+                        "direction": row["direction"],
+                        "departure_time": dep_dt.strftime("%H:%M"),
+                        "destination": row["destination_station_id"]
+                    })
+                    curr_dt += timedelta(minutes=freq)
                     
-                    first_dt = parse_time(row["first_train_time"])
-                    last_dt = parse_time(row["last_train_time"])
-                    freq = row["frequency_min"]
-                    
-                    curr_dt = first_dt
-                    while curr_dt <= last_dt:
-                        dep_dt = curr_dt + timedelta(minutes=offset)
-                        departures.append({
-                            "schedule_id": row["schedule_id"],
-                            "type": f"Rail ({row['service_type']})",
-                            "line": row["line"],
-                            "direction": row["direction"],
-                            "departure_time": dep_dt.strftime("%H:%M"),
-                            "destination": stops[-1]
-                        })
-                        curr_dt += timedelta(minutes=freq)
-                        
     departures.sort(key=lambda x: x["departure_time"])
     return departures
 

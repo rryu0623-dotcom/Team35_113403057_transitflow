@@ -39,22 +39,16 @@ def seed():
         print("  Creating MetroStation nodes...")
         session.run("""
             UNWIND $stations AS s
-            CREATE (n:MetroStation {
-                id: s.station_id,
-                name: s.name,
-                lines: s.lines
-            })
+            MERGE (n:MetroStation {id: s.station_id})
+            SET n.name = s.name, n.lines = s.lines
         """, stations=metro_stations)
 
         # 2. 建立 NationalRailStation 節點
         print("  Creating NationalRailStation nodes...")
         session.run("""
             UNWIND $stations AS s
-            CREATE (n:NationalRailStation {
-                id: s.station_id,
-                name: s.name,
-                lines: s.lines
-            })
+            MERGE (n:NationalRailStation {id: s.station_id})
+            SET n.name = s.name, n.lines = s.lines
         """, stations=rail_stations)
 
         # 3. 建立 METRO_LINK 關係 (捷運路線)
