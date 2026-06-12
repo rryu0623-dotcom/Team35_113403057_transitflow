@@ -207,7 +207,7 @@ def query_national_rail_availability(
             d.stop_order AS destination_order,
             (d.travel_time_from_origin_min - o.travel_time_from_origin_min) AS travel_time_min,
             (d.stop_order - o.stop_order) AS stops_travelled,
-            (COALESCE(ts.total_seat_count, 0) - COALESCE(bs.booked_seat_count, 0))::int AS available_seats_count
+            (COALESCE(ts.total_seat_count, 0) - COALESCE(bs.booked_seat_count, 0))::int AS available_seats
         FROM national_rail_schedules s
         JOIN national_rail_schedule_stops o ON s.schedule_id = o.schedule_id
         JOIN national_rail_schedule_stops d ON s.schedule_id = d.schedule_id
@@ -234,9 +234,9 @@ def query_national_rail_fare(
     sql = """
         SELECT 
             fare_class,
-            base_fare_usd,
-            per_stop_rate_usd,
-            (base_fare_usd + (per_stop_rate_usd * %s)) AS total_fare_usd
+            base_fare_usd::float,
+            per_stop_rate_usd::float,
+            (base_fare_usd + (per_stop_rate_usd * %s))::float AS total_fare_usd
         FROM national_rail_schedule_fares
         WHERE schedule_id = %s AND fare_class = %s::fare_class
     """
@@ -285,9 +285,9 @@ def query_metro_fare(schedule_id: str, stops_travelled: int) -> Optional[dict]:
     """Calculate fare for a given metro schedule and number of stops travelled."""
     sql = """
         SELECT 
-            base_fare_usd,
-            per_stop_rate_usd,
-            (base_fare_usd + (per_stop_rate_usd * %s)) AS total_fare_usd
+            base_fare_usd::float,
+            per_stop_rate_usd::float,
+            (base_fare_usd + (per_stop_rate_usd * %s))::float AS total_fare_usd
         FROM metro_schedules
         WHERE schedule_id = %s AND is_active = TRUE
     """
@@ -362,8 +362,8 @@ def query_user_profile(user_email: str) -> Optional[dict]:
     """Return a user's profile by email."""
     sql = """
         SELECT 
-            user_id, full_name, email, phone, 
-            date_of_birth::text, is_active
+            user_id, full_name, full_name AS name, email, phone, 
+            date_of_birth::text, EXTRACT(YEAR FROM date_of_birth)::int AS year_of_birth, is_active
         FROM registered_users
         WHERE email = %s AND deleted_at IS NULL
     """
@@ -417,7 +417,11 @@ def query_payment_info(booking_id: str) -> Optional[dict]:
     sql = """
         SELECT 
             payment_id, national_booking_id, metro_trip_id, 
-            amount_usd::float, method, status, paid_at::text
+            amount_usd::float AS amount_usd,
+            amount_usd::float AS amount,
+            method,
+            method AS payment_method,
+            status, paid_at::text
         FROM payments
         WHERE (national_booking_id = %s OR metro_trip_id = %s)
           AND deleted_at IS NULL
@@ -564,7 +568,13 @@ def execute_booking(
             """, (payment_id, booking_id, amount_usd))
             
         conn.commit()
-        return True, {"booking_id": booking_id, "amount_usd": float(amount_usd), "seat_id": actual_seat_id}
+        return True, {
+            "booking_id": booking_id,
+            "user_id": user_id,
+            "schedule_id": schedule_id,
+            "seat_id": actual_seat_id,
+            "amount_usd": float(amount_usd)
+        }
     except Exception as e:
         conn.rollback()
         return False, str(e)
@@ -650,7 +660,11 @@ def execute_cancellation(booking_id: str, user_id: str) -> tuple[bool, dict | st
 
             
         conn.commit()
-        return True, {"refund_amount_usd": float(refund_amount), "policy_note": policy_note}
+        return True, {
+            "refund_amount": float(refund_amount),
+            "refund_amount_usd": float(refund_amount),
+            "policy_note": policy_note
+        }
     except Exception as e:
         conn.rollback()
         return False, str(e)
