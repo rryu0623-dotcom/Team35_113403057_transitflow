@@ -140,7 +140,7 @@ def query_national_rail_availability(
     travel_date: Optional[str] = None,
 ) -> list[dict]:
     """Retrieve all available national rail schedules between two stations."""
-    if not travel_date:
+    if not travel_date or str(travel_date).strip().lower() == "none":
         travel_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         
     sql = """
@@ -171,7 +171,7 @@ def query_national_rail_availability(
         JOIN national_rail_schedule_stops d ON s.schedule_id = d.schedule_id AND d.station_id = %s
         WHERE s.is_active = TRUE
           AND o.stop_order < d.stop_order
-          AND s.operates_on ? TRIM(LOWER(to_char(%s::date, 'Day')))
+          AND s.operates_on ? TRIM(LOWER(to_char(%s::date, 'Dy')))
         ORDER BY s.first_train_time
     """
     with _connect() as conn:
@@ -255,7 +255,9 @@ def query_available_seats(
     travel_date: str,
     fare_class: str,
 ) -> list[dict]:
-    """Retrieve all available seats for a national rail schedule on a given date and fare class."""
+    if not travel_date or str(travel_date).strip().lower() == "none":
+        travel_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        
     sql = """
         SELECT s.seat_id, s.coach, s.row, s.seat_column AS column
         FROM national_rail_seats s
@@ -531,7 +533,7 @@ def execute_cancellation(booking_id: str, user_id: str) -> tuple[bool, dict | st
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             # 1. Lock and retrieve booking
             cur.execute("""
-                SELECT b.status, b.amount_usd, s.service_type
+                SELECT b.status, b.amount_usd, b.travel_date, b.departure_time, s.service_type
                 FROM national_rail_bookings b
                 JOIN national_rail_schedules s ON b.schedule_id = s.schedule_id
                 WHERE b.booking_id = %s AND b.user_id = %s

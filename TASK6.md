@@ -3,11 +3,11 @@
 This document outlines the modifications made to implement Task 6 Option Extension.
 
 ## 1. Modified Files
-* **Schema DDL**: [databases/relational/schema.sql](file:///c:/Users/tim06/IM2002-DBMGT-Train-final/databases/relational/schema.sql)
-* **PostgreSQL Seeder**: [skeleton/seed_postgres.py](file:///c:/Users/tim06/IM2002-DBMGT-Train-final/skeleton/seed_postgres.py)
-* **Query Implementation**: [databases/relational/queries.py](file:///c:/Users/tim06/IM2002-DBMGT-Train-final/databases/relational/queries.py)
-* **AI Agent and Tool Definitions**: [skeleton/agent.py](file:///c:/Users/tim06/IM2002-DBMGT-Train-final/skeleton/agent.py)
-* **Gradio Frontend UI**: [skeleton/ui.py](file:///c:/Users/tim06/IM2002-DBMGT-Train-final/skeleton/ui.py)
+* **Schema DDL**: [databases/relational/schema.sql]
+* **PostgreSQL Seeder**: [skeleton/seed_postgres.py]
+* **Query Implementation**: [databases/relational/queries.py]
+* **AI Agent and Tool Definitions**: [skeleton/agent.py]
+* **Gradio Frontend UI**: [skeleton/ui.py]
 
 ## 2. Database Modifications
 ### New Table

@@ -319,7 +319,7 @@ def seed_users(cur):
             real_uuid,
             _hash_password(u["password"]),  # Store secure Argon2id password hash
             u["secret_question"],
-            _hash_password(u["secret_answer"])  # Store secure Argon2id secret answer hash
+            _hash_password(u["secret_answer"].lower())  # Store secure Argon2id secret answer hash
         ))
         
     insert_many(
