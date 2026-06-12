@@ -1,10 +1,5 @@
 # IM2002 — Database Design Document
 
-**學生姓名 (Student Name)**: 王仲毅  
-**學校 (University)**: 中央大學 (National Central University)
-
----
-
 ## Section 1 — Entity-Relationship Diagram
 
 以下為 TransitFlow 系統的核心實體關聯圖（ERD）：
@@ -153,31 +148,31 @@
 
 ## Section 7: Task 6 Option Extension
 
-### 7.1 Motivation and Overview
-In a real-world transit network, passengers and operators need tools to adapt to real-time service disruptions, query precise station timetables, and monitor system health. To resolve these operational requirements, we designed and implemented four key enhancements:
-1. **Custom Departure Time Booking**: Allows passengers to specify their preferred hour/minute (HH:MM) when booking a ticket, rather than relying on a single daily default train, keeping booking records accurate.
-2. **Real-time Service Alerts**: Tracks active operator disruptions (maintenance, signaling issues, severe delays) to warn users about delay ripple effects.
-3. **Dynamic Station Departures**: Computes real-time schedules for any metro or national rail station, calculating departures throughout the day using line frequencies, offsets, and start times.
-4. **Operations Analytics Dashboard**: Provides transit administrators with high-level aggregates (revenue split, busiest origin hubs, passenger ratings, payment breakdown) to monitor system performance.
+### 7.1 動機與概述 (Motivation and Overview)
+在真實世界的交通網路中，乘客與營運方需要工具來應對即時的服務中斷、查詢精確的車站時刻表，並監控系統健康狀況。為了解決這些營運需求，我們設計並實作了四項關鍵增強功能：
+1. **自訂發車時間訂票 (Custom Departure Time Booking)**：允許乘客在訂票時指定他們偏好的發車時/分 (HH:MM)，而非依賴單一的預設每日列車，確保訂單紀錄的準確性。
+2. **即時服務快訊 (Real-time Service Alerts)**：追蹤營運方發布的即時中斷事件（如設備維護、號誌異常、嚴重延誤），以警告使用者可能的延誤漣漪效應。
+3. **動態車站發車時刻 (Dynamic Station Departures)**：針對任何捷運或國家鐵路車站，利用路線班距、行車時間差與首班車時間，動態計算並推演出該站全日的發車時刻表。
+4. **營運分析儀表板 (Operations Analytics Dashboard)**：為交通管理者提供高階聚合數據（營收拆分、最繁忙的出發樞紐、乘客評分、付款方式明細），以監控系統效能。
 
 ---
 
-### 7.2 Database Schema DDL Modifications
-We added the `operator_alerts` table and modified `national_rail_bookings` to include a dynamic `departure_time` parameter:
+### 7.2 資料庫結構 (DDL) 修改
+我們新增了 `operator_alerts` 表格，並修改了 `national_rail_bookings` 以加入動態的 `departure_time` 參數：
 
 ```sql
--- DDL for Operator Alerts Table
+-- 操作員快訊資料表 (Operator Alerts) DDL
 CREATE TABLE operator_alerts (
     alert_id      VARCHAR(10)  PRIMARY KEY,
     line          VARCHAR(10),
     station_id    VARCHAR(10),
-    severity      VARCHAR(20)  NOT NULL, -- 'low', 'medium', 'high'
+    severity      VARCHAR(20)  NOT NULL, -- 'low' (低), 'medium' (中), 'high' (高)
     message       TEXT         NOT NULL,
     created_at    TIMESTAMPTZ  DEFAULT NOW(),
     is_active     BOOLEAN      DEFAULT TRUE
 );
 
--- Column modification in bookings to store actual departure time (DDL snapshot)
+-- 修改訂單表以儲存實際發車時間 (DDL 快照)
 CREATE TABLE national_rail_bookings (
     booking_id             VARCHAR(15)  PRIMARY KEY, 
     user_id                UUID         REFERENCES registered_users(user_id) ON DELETE RESTRICT,
@@ -187,7 +182,7 @@ CREATE TABLE national_rail_bookings (
     destination_station_id VARCHAR(10), 
     destination_station_name VARCHAR(100) NOT NULL,
     travel_date            DATE         NOT NULL,
-    departure_time         TIME         NOT NULL,  -- Custom departure time support
+    departure_time         TIME         NOT NULL,  -- 支援自訂發車時間
     ticket_type            rail_ticket_type  NOT NULL,
     fare_class             fare_class  NOT NULL,
     coach                  VARCHAR(2)   NOT NULL,
@@ -203,34 +198,34 @@ CREATE TABLE national_rail_bookings (
 
 ---
 
-### 7.3 Advanced Query Designs
-The queries are implemented in [databases/relational/queries.py](file:///c:/Users/tim06/IM2002-DBMGT-Train-final/databases/relational/queries.py):
+### 7.3 進階查詢設計 (Advanced Query Designs)
+相關的查詢實作於 [databases/relational/queries.py]
 
-#### 1. Active Operator Alerts Query
+#### 1. 活躍營運快訊查詢 (Active Operator Alerts Query)
 ```sql
 SELECT alert_id, line, station_id, severity, message, created_at::text, is_active
 FROM operator_alerts
 WHERE is_active = TRUE
 ORDER BY severity = 'high' DESC, severity = 'medium' DESC, created_at DESC;
 ```
-*Rationale*: Prioritizes severe ('high') warnings first so that passengers see critical service disruptions immediately.
+*設計理念*：優先排序最嚴重 ('high') 的警告，讓乘客能第一時間看到關鍵的服務中斷資訊。
 
-#### 2. Station Departures Timetable Generator
-This query retrieves all active metro and rail schedules that pass through a specific station, calculates the arrival offset in minutes based on the station's index in the route, and loops from `first_train_time` to `last_train_time` incremented by the line's operating `frequency_min` to generate the complete daily schedule for the station.
+#### 2. 車站發車時刻表生成器 (Station Departures Timetable Generator)
+此查詢會檢索所有經過特定車站的活躍捷運與鐵路班次，根據該車站在路線中的停靠順序計算抵達的時間差（以分鐘為單位），接著從 `first_train_time` 開始，依據該路線的營運班距 `frequency_min` 進行迴圈遞增，直到 `last_train_time`，從而動態生成該車站完整的全日時刻表。
 
-#### 3. Transit Operations Analytics Dashboard
+#### 3. 交通營運分析儀表板 (Transit Operations Analytics Dashboard)
 ```sql
--- Query revenue and counts for National Rail and Metro
+-- 查詢國家鐵路與捷運的總營收與搭乘次數
 SELECT COUNT(*) AS count, SUM(amount_usd)::float AS revenue FROM national_rail_bookings WHERE status != 'cancelled';
 SELECT COUNT(*) AS count, SUM(amount_usd)::float AS revenue FROM metro_travel_history WHERE status != 'cancelled';
 
--- Payment method split
+-- 付款方式拆分比例
 SELECT method, COUNT(*) AS count, SUM(amount_usd)::float AS revenue
 FROM payments
 WHERE status = 'paid'
 GROUP BY method;
 
--- Busiest stations
+-- 最繁忙的車站排行
 SELECT origin_station_name, COUNT(*) AS passenger_count
 FROM national_rail_bookings
 WHERE status != 'cancelled'
@@ -238,51 +233,15 @@ GROUP BY origin_station_name
 ORDER BY passenger_count DESC
 LIMIT 3;
 
--- Average User Rating
+-- 平均使用者評分
 SELECT AVG(rating)::float AS avg_rating, COUNT(*) AS total_feedbacks FROM feedback;
 ```
 
 ---
 
-### 7.4 Gradio UI Layout and Design
-We restructured the frontend to expose these Task 6 queries as responsive, interactive tabs and styled them with a custom CSS theme:
-1. **Glassmorphism Alert Cards**: Active alerts are color-coded (red, yellow, blue) using CSS borders and translucent backgrounds to grab attention instantly without looking cluttered.
-2. **Dynamic Timetables Markdown**: Dynamic departure results are formatted in clean Markdown tables with bold timestamps.
-3. **KPI Operational Cards**: Key system metrics (System Revenue, Rail Bookings, Metro Trips, Avg Rating) are styled as card grids with custom scaling transitions on hover.
-4. **HTML Banners**: Replaced standard headers with a modern linear-gradient banner styling.
-
----
-
-### 7.5 Verification and Testing
-Automated seeder execution runs successfully and populates mock data:
-
-```
-Connecting to PostgreSQL...
-Seeding tables (dependency order):
-- Metro stations...
-  metro_stations seeded: 20 stations, 25 lines mapping, 42 adjacencies
-- National rail stations...
-  national_rail_stations seeded: 10 stations, 11 lines mapping, 18 adjacencies, 3 cross-network interchanges
-- Metro schedules...
-  metro_schedules seeded: 8 schedules (JSONB stops/operates embedded)
-  national_rail_schedules seeded: 8 schedules, 16 class fares (JSONB stops/operates embedded)
-  seat_layouts templates seeded: 4 layouts, 8 coaches, 72 seats
-- Users...
-  registered_users & credentials seeded: 20 users (mapped with secure random UUIDs)
-- Bookings...
-  national_rail_bookings seeded: 20 records
-- Metro travels...
-  metro_passes seeded: 5 records
-  metro_travel_history seeded: 24 records
-- Payments...
-  payments seeded: 40 polymorphic records
-- Feedback...
-  feedback seeded: 30 polymorphic records
-- Operator Alerts (Task 6)...
-  operator_alerts seeded: 3 alerts
-
-All done. Database seeded successfully.
-```
-
-The AI agent has been validated and robustly parses natural language query intents, routing them to the correct databases even in the presence of Ollama JSON schema hallucinations. All UI components have been verified via a headless browser subagent session, logging no errors and updating values dynamically upon clicking refresh and dropdown selections.
-
+### 7.4 Gradio 使用者介面配置與設計
+我們重構了前端介面，將 Task 6 的查詢功能轉化為具備響應式與互動性的分頁，並套用了客製化的 CSS 主題：
+1. **毛玻璃特效快訊卡片 (Glassmorphism Alert Cards)**：活躍的快訊根據嚴重程度以 CSS 邊框與半透明背景進行顏色編碼（紅、黃、藍），在不顯雜亂的情況下瞬間抓住使用者目光。
+2. **動態時刻表 Markdown (Dynamic Timetables Markdown)**：動態生成的發車結果被格式化為簡潔的 Markdown 表格，並將時間標籤以粗體顯示。
+3. **KPI 營運數據卡片 (KPI Operational Cards)**：系統關鍵指標（系統營收、鐵路訂單數、捷運搭乘數、平均評分）被設計為卡片網格，並在游標懸停時帶有客製化的縮放轉場動畫。
+4. **HTML 漸層橫幅 (HTML Banners)**：將標準的頁首替換為現代化的線性漸層橫幅設計。
