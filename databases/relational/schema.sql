@@ -109,10 +109,8 @@ CREATE TABLE metro_schedules (
     schedule_id                 VARCHAR(20)  PRIMARY KEY,
     line                        VARCHAR(10)  NOT NULL,
     direction                   transit_direction  NOT NULL,
-    origin_station_id           VARCHAR(10)  REFERENCES metro_stations(station_id),
-    destination_station_id      VARCHAR(10)  REFERENCES metro_stations(station_id),
-    stops_in_order              JSONB        NOT NULL,
-    travel_time_from_origin_min JSONB        NOT NULL,
+    origin_station_id           VARCHAR(10)  REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id      VARCHAR(10)  REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
     first_train_time            TIME         NOT NULL,
     last_train_time             TIME         NOT NULL,
     base_fare_usd               NUMERIC(5,2) NOT NULL,
@@ -123,23 +121,36 @@ CREATE TABLE metro_schedules (
     is_active                   BOOLEAN      NOT NULL DEFAULT TRUE
 );
 
+CREATE TABLE metro_schedule_stops (
+    schedule_id                 VARCHAR(20) REFERENCES metro_schedules(schedule_id) ON DELETE CASCADE,
+    station_id                  VARCHAR(10) REFERENCES metro_stations(station_id) ON DELETE CASCADE,
+    stop_order                  INTEGER NOT NULL,
+    travel_time_from_origin_min INTEGER NOT NULL,
+    PRIMARY KEY (schedule_id, station_id)
+);
+
 -- 10. National rail schedule table
 CREATE TABLE national_rail_schedules (
     schedule_id                 VARCHAR(20) PRIMARY KEY,
     line                        VARCHAR(10) NOT NULL,
     service_type                rail_service_type NOT NULL, 
     direction                   transit_direction NOT NULL,
-    origin_station_id           VARCHAR(10) REFERENCES national_rail_stations(station_id),
-    destination_station_id      VARCHAR(10) REFERENCES national_rail_stations(station_id),
-    stops_in_order              JSONB NOT NULL,
-    passed_through_stations     JSONB NOT NULL DEFAULT '[]'::jsonb,
-    travel_time_from_origin_min JSONB NOT NULL,
+    origin_station_id           VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id      VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
     first_train_time            TIME        NOT NULL,
     last_train_time             TIME        NOT NULL,
     frequency_min               INTEGER     NOT NULL,
     operates_on                 JSONB NOT NULL,
     deleted_at                  TIMESTAMPTZ DEFAULT NULL,
     is_active                   BOOLEAN     NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE national_rail_schedule_stops (
+    schedule_id                 VARCHAR(20) REFERENCES national_rail_schedules(schedule_id) ON DELETE CASCADE,
+    station_id                  VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE CASCADE,
+    stop_order                  INTEGER NOT NULL,
+    travel_time_from_origin_min INTEGER NOT NULL,
+    PRIMARY KEY (schedule_id, station_id)
 );
 
 -- 11. National rail fare classes
@@ -224,7 +235,7 @@ CREATE TABLE national_rail_bookings (
 -- 18.5 Metro passes table (note: breaks self-reference in metro travel history)
 CREATE TABLE metro_passes (
     pass_id     VARCHAR(15)  PRIMARY KEY,
-    user_id     UUID         REFERENCES registered_users(user_id),
+    user_id     UUID         REFERENCES registered_users(user_id) ON DELETE CASCADE,
     pass_type   pass_type  NOT NULL,
     expires_at  TIMESTAMPTZ,
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
@@ -271,7 +282,7 @@ CREATE TABLE feedback (
     feedback_id         VARCHAR(15)  PRIMARY KEY,
     national_booking_id VARCHAR(15)  REFERENCES national_rail_bookings(booking_id) ON DELETE SET NULL,
     metro_trip_id       VARCHAR(15)  REFERENCES metro_travel_history(trip_id) ON DELETE SET NULL,
-    user_id             UUID         REFERENCES registered_users(user_id),
+    user_id             UUID         REFERENCES registered_users(user_id) ON DELETE SET NULL,
     rating              INTEGER      NOT NULL CHECK (rating >= 1 AND rating <= 5),
     comment             TEXT,
     submitted_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -295,9 +306,9 @@ CREATE INDEX idx_metro_sched_search ON metro_schedules (line, is_active);
 CREATE INDEX idx_nr_sched_search ON national_rail_schedules (line, service_type, is_active);
 
 -- Optimize JSONB search inside schedules
-CREATE INDEX idx_metro_sched_stops ON metro_schedules USING GIN (stops_in_order);
+CREATE INDEX idx_metro_sched_stops ON metro_schedule_stops (station_id);
 CREATE INDEX idx_metro_sched_operates ON metro_schedules USING GIN (operates_on);
-CREATE INDEX idx_nr_sched_stops ON national_rail_schedules USING GIN (stops_in_order);
+CREATE INDEX idx_nr_sched_stops ON national_rail_schedule_stops (station_id);
 CREATE INDEX idx_nr_sched_operates ON national_rail_schedules USING GIN (operates_on);
 
 -- Partial indexes: reduce polymorphic join index size and improve cache hit rate
