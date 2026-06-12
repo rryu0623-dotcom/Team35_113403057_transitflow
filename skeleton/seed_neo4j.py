@@ -59,7 +59,9 @@ def seed():
             UNWIND s.adjacent_stations AS adj
             MATCH (b:MetroStation {id: adj.station_id})
             MERGE (a)-[r:METRO_LINK {line: adj.line}]->(b)
-            SET r.travel_time_min = adj.travel_time_min
+            SET r.travel_time_min = adj.travel_time_min,
+                r.cost_standard = 0.30,
+                r.cost_first = 0.30
         """, stations=metro_stations)
 
         # 4. Create RAIL_LINK relationships (national rail lines)
@@ -70,7 +72,9 @@ def seed():
             UNWIND s.adjacent_stations AS adj
             MATCH (b:NationalRailStation {id: adj.station_id})
             MERGE (a)-[r:RAIL_LINK {line: adj.line}]->(b)
-            SET r.travel_time_min = adj.travel_time_min
+            SET r.travel_time_min = adj.travel_time_min,
+                r.cost_standard = 1.50,
+                r.cost_first = 2.50
         """, stations=rail_stations)
 
         # 5. Create INTERCHANGE_TO relationships (bidirectional)

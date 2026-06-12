@@ -24,7 +24,8 @@ DATA_DIR    = os.path.join(PROJECT_DIR, "train-mock-data")
 
 sys.path.insert(0, PROJECT_DIR)
 from skeleton import config as cfg
-from databases.relational.queries import _hash_password
+from databases.relational.queries import _hash_password, _generate_salt, _hash_password_argon2
+
 
 
 def load(filename):
@@ -224,6 +225,15 @@ def seed_national_rail_schedules(cur):
         for sid in s.get("passed_through_stations", []):
             passed_rows.append((s["schedule_id"], sid))
         
+        for idx, sid in enumerate(s["stops_in_order"], start=1):
+            travel_time = s["travel_time_from_origin_min"][sid]
+            stops_rows.append((
+                s["schedule_id"],
+                sid,
+                idx,
+                travel_time
+            ))
+        
     insert_many(
         cur,
         "national_rail_schedules",
@@ -247,7 +257,13 @@ def seed_national_rail_schedules(cur):
         passed_rows
     )
     
-    # 2. national_rail_schedule_fares
+    insert_many(
+        cur,
+        "national_rail_schedule_stops",
+        ["schedule_id", "station_id", "stop_order", "travel_time_from_origin_min"],
+        stops_rows
+    )
+    
     fares_rows = []
     for s in data:
         for fare_class, rates in s["fare_classes"].items():
@@ -332,9 +348,10 @@ def seed_users(cur):
     insert_many(
         cur,
         "user_credentials",
-        ["user_id", "password_hash", "secret_question", "secret_answer_hash"],
+        ["user_id", "password_hash", "password_salt", "secret_question", "secret_answer_hash", "secret_answer_salt"],
         creds_rows
     )
+
     
     print(f"  registered_users & credentials seeded: {len(data)} users (mapped with secure random UUIDs)")
 
