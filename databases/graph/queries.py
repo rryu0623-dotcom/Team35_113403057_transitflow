@@ -189,15 +189,28 @@ def query_cheapest_route(
                     "legs": []
                 }
             
+            if network == "metro":
+                base_fare = 0.80
+                per_stop_rate = 0.30
+            else:
+                if fare_class == "first":
+                    base_fare = 4.00
+                    per_stop_rate = 2.50
+                else:
+                    base_fare = 2.50
+                    per_stop_rate = 1.50
+            
             query = f"""
             MATCH (start:{label} {{id: $origin}})
             MATCH (end:{label} {{id: $destination}})
-            MATCH path = shortestPath((start)-[:{link}*]->(end))
+            CALL apoc.algo.dijkstra(start, end, '{link}', 'fare_weight', $per_stop_rate)
+            YIELD path, weight
             RETURN
               [node IN nodes(path) | {{id: node.id, name: node.name}}] AS path_nodes,
-              [rel IN relationships(path) | {{line: rel.line, travel_time_min: rel.travel_time_min}}] AS path_rels
+              [rel IN relationships(path) | {{line: rel.line, travel_time_min: rel.travel_time_min}}] AS path_rels,
+              weight AS variable_fare
             """
-            res = session.run(query, origin=origin_id, destination=destination_id)
+            res = session.run(query, origin=origin_id, destination=destination_id, per_stop_rate=float(per_stop_rate))
             row = res.single()
             if not row or not row["path_nodes"]:
                 return {
@@ -209,15 +222,7 @@ def query_cheapest_route(
             
             stations = row["path_nodes"]
             rels = row["path_rels"]
-            n_stops = len(rels)
-            
-            if network == "metro":
-                total_fare_usd = 0.80 + 0.30 * n_stops
-            else:
-                if fare_class == "first":
-                    total_fare_usd = 4.00 + 2.50 * n_stops
-                else:
-                    total_fare_usd = 2.50 + 1.50 * n_stops
+            total_fare_usd = base_fare + row["variable_fare"]
             
             legs = []
             for i in range(len(rels)):

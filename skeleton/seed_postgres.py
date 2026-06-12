@@ -288,12 +288,12 @@ def seed_seat_layouts(cur):
 def seed_users(cur):
     data = load("registered_users.json")
     
-    # Scheme A: 產生確定性 UUID 並填充用戶對照表
-    # 【工業級優化點：確定性 UUID (Deterministic UUID)】
-    # 原本使用 uuid.uuid4() 在重覆執行 seed_postgres.py 時會生成隨機新 UUID。
-    # 當新 UUID 因為 email UNIQUE 約束被資料庫略過（DO NOTHING）時，
-    # 記憶體中的 USER_UUID_MAP 會留下未寫入資料庫的 UUID，導致後續插入 bookings 時發生外鍵約束衝突 (FK Violation)。
-    # 改用 uuid.uuid5 基於 NAMESPACE_DNS 與 mock user_id 可確保每次執行都取得完全相同的 UUID，支持安全重複執行。
+    # Scheme A: Generate deterministic UUIDs and populate user mapping
+    # [Industrial-Grade Optimization: Deterministic UUID]
+    # Originally, using uuid.uuid4() would generate random new UUIDs upon re-running seed_postgres.py.
+    # When the new UUID is skipped by the database (DO NOTHING) due to the email UNIQUE constraint,
+    # the USER_UUID_MAP in memory would retain a UUID not written to the database, causing FK Violations when inserting bookings later.
+    # Using uuid.uuid5 based on NAMESPACE_DNS and mock user_id ensures the exact same UUID is obtained every time, supporting safe re-runs.
     users_rows = []
     creds_rows = []
     
@@ -312,14 +312,14 @@ def seed_users(cur):
             u["is_active"]
         ))
         
-        # 【工業級優化點：高強度密碼與密保問答雜湊 Argon2id】
+        # [Industrial-Grade Optimization: High-strength password and secret question hashing with Argon2id]
         # 
-        # 這裡改用從 queries 導入的 Argon2id 密碼雜湊算法，確保資料庫中完全不儲存任何明文。
+        # Here we switch to the Argon2id password hashing algorithm imported from queries, ensuring no plain text is ever stored in the database.
         creds_rows.append((
             real_uuid,
-            _hash_password(u["password"]),  # 儲存安全 Argon2id 密碼雜湊
+            _hash_password(u["password"]),  # Store secure Argon2id password hash
             u["secret_question"],
-            _hash_password(u["secret_answer"])  # 儲存安全 Argon2id 密保答案雜湊
+            _hash_password(u["secret_answer"])  # Store secure Argon2id secret answer hash
         ))
         
     insert_many(

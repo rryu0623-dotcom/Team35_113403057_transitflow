@@ -104,8 +104,13 @@ CREATE TABLE station_interchanges (
     PRIMARY KEY (metro_station_id, national_rail_station_id)
 );
 
--- Soft delete strategy: applied consistently across all entities using deleted_at TIMESTAMPTZ.
--- This ensures historical integrity (e.g. keeping history) and avoids breaking FK constraints.
+-- ============================================================
+-- SCHEMA DESIGN DECISION: SOFT DELETE STRATEGY
+-- Soft delete strategy is applied consistently across all entities 
+-- using the `deleted_at TIMESTAMPTZ` column.
+-- This ensures historical integrity (e.g. keeping history) and 
+-- avoids breaking FK constraints when records are "deleted".
+-- ============================================================
 
 -- 7. Metro schedule table
 CREATE TABLE metro_schedules (
@@ -200,8 +205,12 @@ CREATE TABLE national_rail_seats (
 );
 
 -- 17. Registered users table
+-- ============================================================
+-- SCHEMA DESIGN DECISION: PRIMARY KEY (UUID vs SERIAL)
+-- We chose UUID over SERIAL for user_id to prevent enumeration
+-- attacks and allow for distributed/offline generation if needed.
+-- ============================================================
 CREATE TABLE registered_users (
-    -- UUID chosen to prevent enumeration attacks and allow distributed generation
     user_id       UUID         PRIMARY KEY,
     full_name     VARCHAR(100), 
     email         VARCHAR(100) UNIQUE, 

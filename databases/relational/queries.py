@@ -37,22 +37,23 @@ from skeleton.config import PG_DSN, VECTOR_TOP_K, VECTOR_SIMILARITY_THRESHOLD
 
 
 # ==============================================================================
-#  工業級優化點：資料庫連線池 (Database Connection Pooling)
+#  Industrial-Grade Optimization: Database Connection Pooling
 # ==============================================================================
-# 原本的 _connect() 在每次查詢時都會向資料庫重新開啟一個實體 TCP 連線，
-# 這在高併發/高流量的生產環境中會造成巨大的延遲與連線數耗盡 (Connection Exhaustion) 的崩潰。
-# 這裡引入 ThreadedConnectionPool (最小 1 個連線，最大 20 個連線)。
+# The original _connect() opened a new physical TCP connection to the database
+# on every query, which would cause huge latency and connection exhaustion crashes
+# in high-concurrency/high-traffic production environments.
+# Here we introduce ThreadedConnectionPool (min 1 connection, max 20 connections).
 # 
-# 為了完美向後相容原本的 context manager (with _connect() as conn) 與手動 conn.close() 的寫法，
-# 我們設計了 ConnectionProxy 代理類別：
-# 1. 攔截 close()：呼叫 close() 時，不會真正關閉連線，而是安全地將連線歸還到 pool 中。
-# 2. 自動回收：當 context manager (__exit__) 結束時，自動執行 commit/rollback 並安全回收連線。
-# 3. 透明轉發：所有其他屬性與方法調用皆透明地委託給真實的 psycopg2 connection 物件。
+# To perfectly backwards-compatibilize the original context manager (with _connect() as conn) 
+# and manual conn.close() syntax, we designed a ConnectionProxy proxy class:
+# 1. Intercept close(): Calling close() doesn't actually close the connection, but safely returns it to the pool.
+# 2. Auto-recycle: When the context manager (__exit__) ends, it auto-executes commit/rollback and safely recycles the connection.
+# 3. Transparent forwarding: All other attribute and method calls are transparently delegated to the real psycopg2 connection object.
 # ==============================================================================
 from contextlib import contextmanager
 from psycopg2.pool import ThreadedConnectionPool
 
-# 全域 thread-safe 連線池 (min 1, max 20 connections)
+# Global thread-safe connection pool (min 1, max 20 connections)
 _pool = ThreadedConnectionPool(1, 20, PG_DSN)
 
 class ConnectionProxy:
@@ -61,7 +62,7 @@ class ConnectionProxy:
         self._pool = pool
         
     def __getattr__(self, name):
-        # 透明轉發所有屬性與方法給真實的 psycopg2 連線物件
+        # Transparently forward all attributes and methods to the real psycopg2 connection object
         return getattr(self._conn, name)
         
     def __enter__(self):
@@ -72,19 +73,19 @@ class ConnectionProxy:
         try:
             self._conn.__exit__(exc_type, exc_val, exc_tb)
         finally:
-            # 區塊退出時自動回收連線
+            # Automatically recycle the connection when exiting the block
             self.close()
         
     def close(self):
         try:
-            # 將實體連線歸還給 ThreadedConnectionPool，而不是真的銷毀它
+            # Return the physical connection to the ThreadedConnectionPool instead of actually destroying it
             self._pool.putconn(self._conn)
         except Exception:
             pass
 
 
 def _connect():
-    """從全域 ThreadedConnectionPool 借用一個連線，並包裝於 ConnectionProxy 中傳回。"""
+    """Borrow a connection from the global ThreadedConnectionPool and return it wrapped in a ConnectionProxy."""
     conn = _pool.getconn()
     conn.autocommit = True
     return ConnectionProxy(conn, _pool)
@@ -139,6 +140,9 @@ def query_national_rail_availability(
     travel_date: Optional[str] = None,
 ) -> list[dict]:
     """Retrieve all available national rail schedules between two stations."""
+    if not travel_date:
+        travel_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        
     sql = """
         SELECT 
             s.schedule_id, s.line, s.service_type, s.direction,
@@ -146,17 +150,33 @@ def query_national_rail_availability(
             o.stop_order AS origin_order,
             d.stop_order AS destination_order,
             (d.travel_time_from_origin_min - o.travel_time_from_origin_min) AS travel_time_min,
-            (d.stop_order - o.stop_order) AS stops_travelled
+            (d.stop_order - o.stop_order) AS stops_travelled,
+            (s.first_train_time + (o.travel_time_from_origin_min || ' minutes')::interval)::time::text AS departure_time,
+            (
+                SELECT COUNT(*) 
+                FROM national_rail_seats nrs
+                JOIN national_rail_coaches nrc ON nrs.layout_id = nrc.layout_id AND nrs.coach = nrc.coach
+                JOIN national_rail_seat_layouts nrsl ON nrc.layout_id = nrsl.layout_id
+                WHERE nrsl.schedule_id = s.schedule_id
+                  AND (nrs.coach, nrs.seat_id) NOT IN (
+                      SELECT coach, seat_id FROM national_rail_bookings b
+                      WHERE b.schedule_id = s.schedule_id 
+                        AND b.travel_date = %s 
+                        AND b.status IN ('confirmed', 'completed') 
+                        AND b.deleted_at IS NULL
+                  )
+            ) AS available_seats
         FROM national_rail_schedules s
         JOIN national_rail_schedule_stops o ON s.schedule_id = o.schedule_id AND o.station_id = %s
         JOIN national_rail_schedule_stops d ON s.schedule_id = d.schedule_id AND d.station_id = %s
         WHERE s.is_active = TRUE
           AND o.stop_order < d.stop_order
+          AND s.operates_on ? TRIM(LOWER(to_char(%s::date, 'Day')))
         ORDER BY s.first_train_time
     """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (origin_id, destination_id))
+            cur.execute(sql, (travel_date, origin_id, destination_id, travel_date))
             return [dict(row) for row in cur.fetchall()]
 
 
@@ -191,7 +211,14 @@ def query_metro_schedules(origin_id: str, destination_id: str) -> list[dict]:
             o.stop_order AS origin_order,
             d.stop_order AS destination_order,
             (d.travel_time_from_origin_min - o.travel_time_from_origin_min) AS travel_time_min,
-            (d.stop_order - o.stop_order) AS stops_travelled
+            (d.stop_order - o.stop_order) AS stops_travelled,
+            (
+                SELECT json_agg(station_id ORDER BY stop_order)
+                FROM metro_schedule_stops ms
+                WHERE ms.schedule_id = s.schedule_id 
+                  AND ms.stop_order >= o.stop_order 
+                  AND ms.stop_order <= d.stop_order
+            ) AS stops_in_order
         FROM metro_schedules s
         JOIN metro_schedule_stops o ON s.schedule_id = o.schedule_id AND o.station_id = %s
         JOIN metro_schedule_stops d ON s.schedule_id = d.schedule_id AND d.station_id = %s
@@ -607,7 +634,7 @@ def register_user(
             cur.execute("""
                 INSERT INTO user_credentials (user_id, password_hash, secret_question, secret_answer_hash)
                 VALUES (%s, %s, %s, %s)
-            """, (new_user_id, _hash_password(password), secret_question, _hash_password(secret_answer)))
+            """, (new_user_id, _hash_password(password), secret_question, _hash_password(secret_answer.lower())))
             
         conn.commit()
         return True, new_user_id
@@ -674,7 +701,7 @@ def verify_secret_answer(email: str, answer: str) -> bool:
             cur.execute(sql, (email,))
             row = cur.fetchone()
             if row:
-                return _verify_password(row[0], answer)
+                return _verify_password(row[0], answer.lower())
             return False
 
 def update_password(email: str, new_password: str) -> bool:
