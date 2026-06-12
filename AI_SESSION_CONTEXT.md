@@ -502,11 +502,13 @@ Decision: Use business identifiers (e.g. MS_SCH01, NR_SCH01) as primary keys for
 Decision: Use business identifiers (e.g. BK-XXXXXX, MP-XXXXXX, MT-XXXXXX) for external tracking and visibility. Why: Provides human-friendly external reference IDs that are easy to communicate for support/payment tracing.
 Decision: Enforce `num_nonnulls(national_booking_id, metro_trip_id) = 1` constraint on `feedback`. Why: Guarantees that feedback is linked strictly to a single journey type and never both.
 Decision: Enforce `num_nonnulls(national_booking_id, metro_trip_id, metro_pass_id) = 1` constraint on `payments`. Why: Allows unified payment records across bookings, single trips, and passes while enforcing strictly valid polymorphic relationships.
+Decision: Explicitly specify ON DELETE actions (e.g. CASCADE, RESTRICT, SET NULL) on all foreign keys in schema.sql. Why: Prevents foreign key constraint default actions from failing static analysis checks and ensures database consistency.
 
 - [ ] Graph schema:
 Decision: Use separate node labels `MetroStation` and `NationalRailStation` linked by METRO_LINK, RAIL_LINK, and INTERCHANGE_TO. Why: To represent the dual-network structure naturally while enabling seamless cross-network pathfinding.
 Decision: Model fare costs as relationship properties (`cost_standard`, `cost_first`) and add base fare in Python. Why: To optimize route searches for the cheapest path using Dijkstra pathfinding on edge weights.
 Decision: Create `INTERCHANGE_TO` relationships between metro and national rail stations with a default travel time of 5.0 minutes. Why: To model cross-network physical transfers at transfer hubs, allowing unified multi-modal pathfinding.
+Decision: Use Neo4j MERGE instead of CREATE in seed_neo4j.py. Why: Ensures database seeding scripts are idempotent and prevents duplicate node/relationship creation during multiple runs.
 
 - [ ] (example) Metro schedule stop ordering: using `jsonb_array_elements` approach — easier to debug than containment operators
 
@@ -543,6 +545,7 @@ Decision: Cast all TIME and TIMESTAMPTZ values to text (e.g. `departure_time::te
 Decision: Dynamically calculate train departure time at intermediate stations by adding travel offsets (`first_train_time + travel_time_min`) in queries. Why: Accurately reflects schedule timetables across stops without hardcoding departure times for every intermediate stop in the DB.
 Decision: Implement hop-limited pathfinding in alternative route searches. Why: Limits resource consumption on the Neo4j graph and avoids evaluating extremely long or impractical routes.
 Decision: Defensively return early when origin and destination stations are identical in graph queries. Why: Avoids APOC Dijkstra failures or infinite loops and reduces unnecessary network roundtrips to Neo4j.
+Decision: Handle hops=0 edge case in query_delay_ripple by returning the source station directly. Why: Prevents Cypher APOC graph pathfinding failure and passes live testing boundary checks.
 
 - [ ] Application integration:
 Decision: Abstract the LLM interface into an environment-switched adapter (`llm_provider.py`). Why: Enables swapping between a local Ollama instance (using llama3.2:1b and nomic-embed-text) and cloud-based Google Gemini API without changing any core agent reasoning or query logic.
